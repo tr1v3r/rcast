@@ -25,6 +25,10 @@ func main() {
 	ctx := context.Background()
 	defer log.Close()
 
+	if debug := len(os.Args) > 1 && os.Args[1] == "--debug"; debug {
+		log.SetLevel(log.DebugLevel)
+	}
+
 	cfg := config.Load()
 
 	// 设备 UUID

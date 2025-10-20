@@ -55,7 +55,9 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			"--keep-running",
 			"--mpv-input-ipc-server="+p.sockPath,
 			"--mpv-volume="+strconv.Itoa(volume),
-			// '--mpv-start={start}',
+			// --mpv-title=, not work
+			// --mpv-fs,
+			// --mpv-start={start},
 			uri)
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("failed to start iina-cli: %w", err)

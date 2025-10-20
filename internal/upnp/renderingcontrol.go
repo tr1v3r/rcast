@@ -16,9 +16,13 @@ import (
 
 func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := st.Context()
 		sa := ParseSOAPAction(r.Header.Get("SOAPACTION"))
 		body, _ := io.ReadAll(r.Body)
 		controller := ControllerID(r)
+
+		log.CtxDebug(ctx, "get request header: %+v", r.Header)
+		log.CtxDebug(ctx, "get request body: %s", string(body))
 
 		switch sa {
 		case "SetVolume":
@@ -34,9 +38,9 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			if v > 100 {
 				v = 100
 			}
-			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetVolume(st.Context(), v); err != nil {
+			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetVolume(ctx, v); err != nil {
 				WriteSOAPError(w, 501, "Action Failed")
-				log.CtxError(st.Context(), "iina set volume error: %v", err)
+				log.CtxError(ctx, "iina set volume error: %v", err)
 				return
 			}
 			if cfg.LinkSystemOutputVolume {
@@ -56,7 +60,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			}
 			mStr := strings.ToLower(XMLText(body, "DesiredMute"))
 			m := mStr == "1" || mStr == "true"
-			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetMute(st.Context(), m); err != nil {
+			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetMute(ctx, m); err != nil {
 				WriteSOAPError(w, 501, "Action Failed")
 				return
 			}
