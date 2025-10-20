@@ -4,9 +4,9 @@ import (
 	"log"
 	"net/http"
 
-	"rcast/internal/config"
-	"rcast/internal/state"
-	"rcast/internal/upnp"
+	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/state"
+	"github.com/tr1v3r/rcast/internal/upnp"
 )
 
 func NewMux() *http.ServeMux {

@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"rcast/internal/config"
-	"rcast/internal/httpserver"
-	"rcast/internal/netutil"
-	"rcast/internal/ssdp"
-	"rcast/internal/state"
-	"rcast/internal/uuid"
+	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/httpserver"
+	"github.com/tr1v3r/rcast/internal/netutil"
+	"github.com/tr1v3r/rcast/internal/ssdp"
+	"github.com/tr1v3r/rcast/internal/state"
+	"github.com/tr1v3r/rcast/internal/uuid"
 )
 
 const serverName = "GoDLNA-DMR/1.1"

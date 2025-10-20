@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"rcast/internal/player"
+	"github.com/tr1v3r/rcast/internal/player"
 )
 
 type PlayerState struct {

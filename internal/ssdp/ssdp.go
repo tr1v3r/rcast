@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"rcast/internal/upnp"
+	"github.com/tr1v3r/rcast/internal/upnp"
 )
 
 const ssdpAddr = "239.255.255.250:1900"

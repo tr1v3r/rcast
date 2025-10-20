@@ -1,4 +1,4 @@
-module rcast
+module github.com/tr1v3r/rcast
 
 go 1.25.3
 

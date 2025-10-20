@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"rcast/internal/config"
-	"rcast/internal/state"
+	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/state"
 )
 
 func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {

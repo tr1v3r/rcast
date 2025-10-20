@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"rcast/internal/config"
-	"rcast/internal/player"
-	"rcast/internal/state"
+	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/player"
+	"github.com/tr1v3r/rcast/internal/state"
 )
 
 func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
