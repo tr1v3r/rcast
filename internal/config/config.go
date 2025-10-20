@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	DefaultUUID     = "uuid:12345678-90ab-cdef-1234-567890abcdef"
+	DefaultUUID     = "uuid:0199ffd9-6856-74cc-a2f2-4c74af0161b1"
 	DefaultPort     = 8200
-	DefaultUUIDPath = "./dmr_uuid.txt"
+	DefaultUUIDPath = "~/.local/rcast/dmr_uuid.txt"
 )
 
 type Config struct {
