@@ -1,2 +1,6 @@
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/tr1v3r/pkg v0.1.11 h1:GZUvxDZE20lUfOv0Z/2zKfNpKilwavI/8vjlm9YGfWc=
+github.com/tr1v3r/pkg v0.1.11/go.mod h1:dG8/OZMlgESoh6SV60XFiEwv6pEBYT+BHQVoHtKTOb8=
+golang.org/x/time v0.3.0 h1:rg5rLMjNzMS1RkNLzCG38eapWhnYLFYXDXj2gOlr8j4=
+golang.org/x/time v0.3.0/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=

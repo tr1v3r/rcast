@@ -1,8 +1,9 @@
 package httpserver
 
 import (
-	"log"
 	"net/http"
+
+	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/state"
@@ -46,7 +47,7 @@ func LogMiddleware(next http.Handler) http.Handler {
 		// 简易日志
 		// 你也可以替换为更完善的 logger
 		// 这里保持简洁
-		log.Printf("%s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		log.Info("%s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(w, r)
 	})
 }

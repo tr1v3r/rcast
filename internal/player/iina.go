@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/tr1v3r/pkg/log"
 )
 
 // https://mpv.io/manual/stable/#properties
@@ -45,7 +45,7 @@ func (p *IINAPlayer) Close(_ context.Context) error {
 }
 
 func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
-	log.Printf("IINAPlayer Play: uri=%s volume=%d", uri, volume)
+	log.CtxDebug(ctx, "IINAPlayer Play: uri=%s volume=%d", uri, volume)
 	if app, cli, err := p.findIINA(); err != nil {
 		return fmt.Errorf("IINA not found: %w", err)
 	} else if cli != "" {

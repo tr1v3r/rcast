@@ -3,10 +3,11 @@ package upnp
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/player"
@@ -35,7 +36,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			}
 			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetVolume(st.Context(), v); err != nil {
 				WriteSOAPError(w, 501, "Action Failed")
-				log.Printf("iina set volume error: %v", err)
+				log.CtxError(st.Context(), "iina set volume error: %v", err)
 				return
 			}
 			if cfg.LinkSystemOutputVolume {

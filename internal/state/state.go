@@ -2,9 +2,10 @@ package state
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/player"
 )
@@ -58,7 +59,7 @@ func (s *PlayerState) Stop() {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		if err := p.Stop(s.ctx); err != nil {
-			log.Printf("player stop error: %v", err)
+			log.CtxInfo(s.ctx, "player stop error: %v", err)
 		}
 	}
 }

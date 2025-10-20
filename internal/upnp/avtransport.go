@@ -2,9 +2,10 @@ package upnp
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"strings"
+
+	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/state"
@@ -42,7 +43,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				return
 			}
 			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).Play(st.Context(), uri, st.Volume); err != nil {
-				log.Printf("iina play error: %v", err)
+				log.CtxError(st.Context(), "iina play error: %v", err)
 				WriteSOAPError(w, 701, "Playback failed")
 				return
 			}
