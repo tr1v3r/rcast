@@ -14,7 +14,7 @@ func DeviceDescriptionXML(base, deviceUUID string) string {
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <device>
     <deviceType>%s</deviceType>
-    <friendlyName>Go IINA Renderer</friendlyName>
+    <friendlyName>RCast</friendlyName>
     <manufacturer>GoDLNA</manufacturer>
     <modelName>GoDLNA-DMR</modelName>
     <UDN>%s</UDN>

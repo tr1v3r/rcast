@@ -19,7 +19,7 @@ import (
 	"github.com/tr1v3r/rcast/internal/uuid"
 )
 
-const serverName = "GoDLNA-DMR/1.1"
+const serverName = "RCast-DMR/1.1" // "GoDLNA-DMR/1.1"
 
 func main() {
 	ctx := context.Background()
