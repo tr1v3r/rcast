@@ -8,7 +8,7 @@ import (
 const (
 	DefaultUUID     = "uuid:0199ffd9-6856-74cc-a2f2-4c74af0161b1"
 	DefaultPort     = 8200
-	DefaultUUIDPath = "~/.local/rcast/dmr_uuid.txt"
+	DefaultUUIDPath = ".local/rcast/dmr_uuid.txt"
 )
 
 type Config struct {
@@ -19,37 +19,38 @@ type Config struct {
 }
 
 func Load() Config {
-	cfg := Config{
-		UUIDPath:               envStr("DMR_UUID_PATH", DefaultUUIDPath),
-		AllowSessionPreempt:    envBool("DMR_ALLOW_PREEMPT", true),
-		LinkSystemOutputVolume: envBool("DMR_LINK_SYSTEM_VOLUME", false),
-		HTTPPort:               envInt("DMR_HTTP_PORT", DefaultPort),
+	return Config{
+		UUIDPath:               envVar("DMR_UUID_PATH", os.Getenv("HOME")+"/"+DefaultUUIDPath),
+		AllowSessionPreempt:    envVar("DMR_ALLOW_PREEMPT", true),
+		LinkSystemOutputVolume: envVar("DMR_LINK_SYSTEM_VOLUME", false),
+		HTTPPort:               envVar("DMR_HTTP_PORT", DefaultPort),
 	}
-	return cfg
 }
 
-func envStr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func envVar[T ~string | ~bool | ~int](key string, def T) T {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
 	}
-	return def
-}
 
-func envBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err == nil {
-			return b
+	switch any(def).(type) {
+	case string:
+		return any(v).(T)
+	case bool:
+		if b, err := strconv.ParseBool(v); err == nil {
+			return any(b).(T)
 		}
-	}
-	return def
-}
-
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		i, err := strconv.Atoi(v)
-		if err == nil {
-			return i
+	case int:
+		if i, err := strconv.Atoi(v); err == nil {
+			return any(i).(T)
+		}
+	case int64:
+		if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return any(i).(T)
+		}
+	case float64:
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return any(f).(T)
 		}
 	}
 	return def
