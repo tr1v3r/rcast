@@ -2,10 +2,12 @@ package httpserver
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/monitoring"
 	"github.com/tr1v3r/rcast/internal/state"
 	"github.com/tr1v3r/rcast/internal/upnp"
 )
@@ -44,10 +46,18 @@ func RegisterHTTP(mux *http.ServeMux, baseURL, deviceUUID string, st *state.Play
 
 func LogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 简易日志
-		// 你也可以替换为更完善的 logger
-		// 这里保持简洁
-		log.Info("%s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		// Enhanced logging with structured information
+		log.Info("HTTP request method=%s path=%s remote_addr=%s user_agent=%s",
+			r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
+
+		start := time.Now()
 		next.ServeHTTP(w, r)
+		duration := time.Since(start)
+
+		// Record metrics
+		monitoring.GetMetrics().RecordHTTPRequest(r.Method, duration)
+
+		log.Debug("HTTP request completed method=%s path=%s duration=%s",
+			r.Method, r.URL.Path, duration.String())
 	})
 }

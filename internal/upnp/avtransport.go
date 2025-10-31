@@ -8,6 +8,7 @@ import (
 	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/monitoring"
 	"github.com/tr1v3r/rcast/internal/state"
 )
 
@@ -31,6 +32,9 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 		body, _ := io.ReadAll(r.Body)
 		controller := ControllerID(r)
 
+		// Record UPnP action
+		monitoring.GetMetrics().RecordUPnPAction()
+
 		log.CtxDebug(ctx, "get request header: %+v", r.Header)
 		log.CtxDebug(ctx, "get request body: %s", string(body))
 
@@ -38,6 +42,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 		case "SetAVTransportURI":
 			if !st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
 				if !cfg.AllowSessionPreempt {
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 712, "Session in use")
 					return
 				}
@@ -56,24 +61,22 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			}
 			uri, _ := st.GetURI()
 			if uri == "" {
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 714, "No content selected")
 				return
 			}
 
-			// var title string
-			// if didl, err := ParseCurrentURIMetaData(meta); err != nil {
-			// 	log.CtxWarn(ctx, "parse DIDL error: %v", err)
-			// } else if len(didl.Items) > 0 {
-			// 	title = didl.Items[0].Title
-			// }
-			// log.CtxInfo(ctx, "Playing URI: %s Title: %s", uri, title)
-
-			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).Play(ctx, uri, st.Volume); err != nil {
-				log.CtxError(ctx, "iina play error: %v", err)
-				WriteSOAPError(w, 701, "Playback failed")
-				return
-			}
-			st.SetTransportState("PLAYING")
+			// Start playback asynchronously
+			go func() {
+				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
+				if err := st.GetPlayer(playerKey).Play(ctx, uri, st.Volume); err != nil {
+					log.CtxError(ctx, "iina play error: %v", err)
+					monitoring.GetMetrics().RecordPlayerError()
+					// Note: Can't send error response here since HTTP response already sent
+					return
+				}
+				st.SetTransportState("PLAYING")
+			}()
 			WriteSOAPOK(w, "PlayResponse")
 
 		case "Pause":
@@ -81,8 +84,12 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				WriteSOAPError(w, 712, "Session in use")
 				return
 			}
-			_ = st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).Pause(ctx)
-			st.SetTransportState("PAUSED_PLAYBACK")
+			// Pause asynchronously
+			go func() {
+				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
+				_ = st.GetPlayer(playerKey).Pause(ctx)
+				st.SetTransportState("PAUSED_PLAYBACK")
+			}()
 			WriteSOAPOK(w, "PauseResponse")
 
 		case "Stop":
@@ -90,11 +97,14 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				WriteSOAPError(w, 712, "Session in use")
 				return
 			}
-			addr := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-			_ = st.GetPlayer(addr).Stop(ctx)
-			st.RemovePlayer(addr)
-			st.SetTransportState("STOPPED")
-			st.ReleaseSession()
+			// Stop asynchronously
+			go func() {
+				addr := strings.SplitN(r.RemoteAddr, ":", 2)[0]
+				_ = st.GetPlayer(addr).Stop(ctx)
+				st.RemovePlayer(addr)
+				st.SetTransportState("STOPPED")
+				st.ReleaseSession()
+			}()
 			WriteSOAPOK(w, "StopResponse")
 
 		default:

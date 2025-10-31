@@ -21,19 +21,34 @@ func WriteSOAPOK(w http.ResponseWriter, respName string) {
 
 func WriteSOAPOKWithBody(w http.ResponseWriter, respName, inner string) {
 	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
-	env := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+
+	var builder strings.Builder
+	builder.Grow(256 + len(respName)*2 + len(inner)) // Pre-allocate buffer
+
+	builder.WriteString(`<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
-    <u:%s xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">%s</u:%s>
+    <u:`)
+	builder.WriteString(respName)
+	builder.WriteString(` xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">`)
+	builder.WriteString(inner)
+	builder.WriteString(`</u:`)
+	builder.WriteString(respName)
+	builder.WriteString(`>
   </s:Body>
-</s:Envelope>`, respName, inner, respName)
-	_, _ = w.Write([]byte(env))
+</s:Envelope>`)
+
+	w.Write([]byte(builder.String()))
 }
 
 func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
 	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
 	w.WriteHeader(500)
-	env := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+
+	var builder strings.Builder
+	builder.Grow(512 + len(desc)) // Pre-allocate buffer
+
+	builder.WriteString(`<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
     <s:Fault>
@@ -41,14 +56,19 @@ func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
       <faultstring>UPnPError</faultstring>
       <detail>
         <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
-          <errorCode>%d</errorCode>
-          <errorDescription>%s</errorDescription>
+          <errorCode>`)
+	builder.WriteString(fmt.Sprintf("%d", code))
+	builder.WriteString(`</errorCode>
+          <errorDescription>`)
+	builder.WriteString(desc)
+	builder.WriteString(`</errorDescription>
         </UPnPError>
       </detail>
     </s:Fault>
   </s:Body>
-</s:Envelope>`, code, desc)
-	_, _ = w.Write([]byte(env))
+</s:Envelope>`)
+
+	w.Write([]byte(builder.String()))
 }
 
 func XMLText(b []byte, tag string) string {

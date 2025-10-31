@@ -36,12 +36,27 @@ func (p *IINAPlayer) Close(_ context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var closeErr error
 	if p.conn != nil {
 		if err := p.conn.Close(); err != nil {
-			return fmt.Errorf("closing iina ipc socket fail: %w", err)
+			closeErr = fmt.Errorf("closing iina ipc socket fail: %w", err)
 		}
+		p.conn = nil
+		p.reader = nil
 	}
-	return os.Remove(p.sockPath)
+
+	// Remove socket file if it exists
+	if p.sockPath != "" {
+		if err := os.Remove(p.sockPath); err != nil && !os.IsNotExist(err) {
+			if closeErr != nil {
+				return fmt.Errorf("multiple errors: %w, socket removal: %v", closeErr, err)
+			}
+			return fmt.Errorf("removing socket file: %w", err)
+		}
+		p.sockPath = ""
+	}
+
+	return closeErr
 }
 
 func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
@@ -103,11 +118,25 @@ func (p *IINAPlayer) Pause(ctx context.Context) error {
 }
 
 func (p *IINAPlayer) Stop(ctx context.Context) error {
-	_ = p.Close(ctx)
-	if p.process == nil {
-		return nil
+	var stopErr error
+
+	// First close the connection and clean up resources
+	if err := p.Close(ctx); err != nil {
+		stopErr = fmt.Errorf("closing player resources: %w", err)
 	}
-	return p.process.Kill()
+
+	// Then kill the process if it exists
+	if p.process != nil {
+		if err := p.process.Kill(); err != nil {
+			if stopErr != nil {
+				return fmt.Errorf("multiple errors: %w, killing process: %v", stopErr, err)
+			}
+			return fmt.Errorf("killing process: %w", err)
+		}
+		p.process = nil
+	}
+
+	return stopErr
 }
 
 func (p *IINAPlayer) SetVolume(ctx context.Context, v int) error {

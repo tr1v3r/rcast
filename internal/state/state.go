@@ -14,7 +14,7 @@ type PlayerState struct {
 	ctx context.Context
 
 	mu             sync.RWMutex
-	players        map[string]player.Player
+	players        map[string]*playerEntry
 	TransportURI   string
 	TransportMeta  string
 	TransportState string // STOPPED | PLAYING | PAUSED_PLAYBACK | TRANSITIONING
@@ -25,10 +25,16 @@ type PlayerState struct {
 	SessionSince time.Time
 }
 
+type playerEntry struct {
+	player    player.Player
+	lastUsed  time.Time
+	createdAt time.Time
+}
+
 func New(ctx context.Context) *PlayerState {
 	return &PlayerState{
 		ctx:     ctx,
-		players: make(map[string]player.Player),
+		players: make(map[string]*playerEntry),
 
 		TransportState: "STOPPED",
 		Volume:         50,
@@ -41,27 +47,58 @@ func (s *PlayerState) Context() context.Context { return s.ctx }
 func (s *PlayerState) GetPlayer(key string) player.Player {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p, ok := s.players[key]; !ok {
-		s.players[key] = player.NewIINAPlayer()
-		return s.players[key]
+
+	// Clean up expired players first
+	s.cleanupExpiredPlayers()
+
+	now := time.Now()
+	if entry, ok := s.players[key]; ok {
+		entry.lastUsed = now
+		return entry.player
 	} else {
-		return p
+		entry := &playerEntry{
+			player:    player.NewIINAPlayer(),
+			lastUsed:  now,
+			createdAt: now,
+		}
+		s.players[key] = entry
+		return entry.player
 	}
 }
 func (s *PlayerState) RemovePlayer(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.players, key)
+	if entry, ok := s.players[key]; ok {
+		// Clean up the player resources before removing
+		_ = entry.player.Stop(s.ctx)
+		delete(s.players, key)
+	}
+}
+
+// cleanupExpiredPlayers removes players that haven't been used for more than 10 minutes
+func (s *PlayerState) cleanupExpiredPlayers() {
+	now := time.Now()
+	maxAge := 10 * time.Minute // Players expire after 10 minutes of inactivity
+
+	for key, entry := range s.players {
+		if now.Sub(entry.lastUsed) > maxAge {
+			// Clean up expired player
+			_ = entry.player.Stop(s.ctx)
+			delete(s.players, key)
+		}
+	}
 }
 
 func (s *PlayerState) Stop() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, p := range s.players {
-		if err := p.Stop(s.ctx); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range s.players {
+		if err := entry.player.Stop(s.ctx); err != nil {
 			log.CtxInfo(s.ctx, "player stop error: %v", err)
 		}
 	}
+	// Clear players map after stopping all
+	s.players = make(map[string]*playerEntry)
 }
 
 func (s *PlayerState) GetURI() (string, string) {

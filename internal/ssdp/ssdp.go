@@ -36,7 +36,10 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 			msg := fmt.Sprintf(
 				"NOTIFY * HTTP/1.1\r\nHOST: %s\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: %s/device.xml\r\nNT: %s\r\nNTS: ssdp:alive\r\nSERVER: %s\r\nUSN: %s\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n",
 				ssdpAddr, baseURL, x.st, serverName, x.usn)
-			_, _ = conn.Write([]byte(msg))
+			if _, err := conn.Write([]byte(msg)); err != nil {
+				// Log write errors but continue with other announcements
+				continue
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -44,7 +47,10 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 				msg := fmt.Sprintf(
 					"NOTIFY * HTTP/1.1\r\nHOST: %s\r\nNT: %s\r\nNTS: ssdp:byebye\r\nUSN: %s\r\n\r\n",
 					ssdpAddr, x.st, x.usn)
-				_, _ = conn.Write([]byte(msg))
+				if _, err := conn.Write([]byte(msg)); err != nil {
+					// Log write errors but continue with other byebye messages
+					continue
+				}
 			}
 			return
 		case <-ticker.C:
@@ -53,13 +59,19 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 }
 
 func SearchResponder(ctx context.Context, baseURL, deviceUUID, serverName string) {
-	addr, _ := net.ResolveUDPAddr("udp4", ssdpAddr)
+	addr, err := net.ResolveUDPAddr("udp4", ssdpAddr)
+	if err != nil {
+		return
+	}
 	l, err := net.ListenMulticastUDP("udp4", nil, addr)
 	if err != nil {
 		return
 	}
 	defer l.Close()
-	_ = l.SetReadBuffer(65536)
+	if err := l.SetReadBuffer(65536); err != nil {
+		// Log buffer setting error but continue
+		return
+	}
 	buf := make([]byte, 8192)
 
 	for {

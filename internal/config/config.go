@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -19,12 +20,17 @@ type Config struct {
 }
 
 func Load() Config {
-	return Config{
+	cfg := Config{
 		UUIDPath:               envVar("DMR_UUID_PATH", os.Getenv("HOME")+"/"+DefaultUUIDPath),
 		AllowSessionPreempt:    envVar("DMR_ALLOW_PREEMPT", true),
 		LinkSystemOutputVolume: envVar("DMR_LINK_SYSTEM_VOLUME", false),
 		HTTPPort:               envVar("DMR_HTTP_PORT", DefaultPort),
 	}
+
+	// Validate configuration
+	cfg.validate()
+
+	return cfg
 }
 
 func envVar[T ~string | ~bool | ~int](key string, def T) T {
@@ -54,4 +60,24 @@ func envVar[T ~string | ~bool | ~int](key string, def T) T {
 		}
 	}
 	return def
+}
+
+// validate performs validation on configuration values
+func (c *Config) validate() {
+	// Validate HTTP port range
+	if c.HTTPPort < 1 || c.HTTPPort > 65535 {
+		c.HTTPPort = DefaultPort
+	}
+
+	// Ensure UUID path directory exists
+	if c.UUIDPath != "" {
+		// Extract directory from path
+		if idx := strings.LastIndex(c.UUIDPath, "/"); idx > 0 {
+			dir := c.UUIDPath[:idx]
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				// Create directory if it doesn't exist
+				os.MkdirAll(dir, 0755)
+			}
+		}
+	}
 }
