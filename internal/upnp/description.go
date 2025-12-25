@@ -3,9 +3,9 @@ package upnp
 import "fmt"
 
 const (
-	DeviceType      = "urn:schemas-upnp-org:device:MediaRenderer:1"
-	AVTransportType = "urn:schemas-upnp-org:service:AVTransport:1"
-	RenderingType   = "urn:schemas-upnp-org:service:RenderingControl:1"
+	DeviceType            = "urn:schemas-upnp-org:device:MediaRenderer:1"
+	AVTransportType       = "urn:schemas-upnp-org:service:AVTransport:1"
+	RenderingType         = "urn:schemas-upnp-org:service:RenderingControl:1"
 	ConnectionManagerType = "urn:schemas-upnp-org:service:ConnectionManager:1"
 )
 
@@ -77,6 +77,14 @@ func SCPDAVTransportXML() string {
       <name>Stop</name>
       <argumentList>
         <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+    <action>
+      <name>Seek</name>
+      <argumentList>
+        <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+        <argument><name>Unit</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SeekMode</relatedStateVariable></argument>
+        <argument><name>Target</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SeekTarget</relatedStateVariable></argument>
       </argumentList>
     </action>
     <action>
@@ -162,6 +170,8 @@ func SCPDAVTransportXML() string {
     <stateVariable sendEvents="no"><name>RelativeCounterPosition</name><dataType>i4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>AbsoluteCounterPosition</name><dataType>i4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekMode</name><dataType>string</dataType><allowedValueList><allowedValue>REL_TIME</allowedValue><allowedValue>ABS_TIME</allowedValue></allowedValueList></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SeekTarget</name><dataType>string</dataType></stateVariable>
   </serviceStateTable>
 </scpd>`
 }

@@ -94,7 +94,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			} else {
 				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
 			}
-			
+
 			log.CtxWarn(ctx, "failed to reuse IINA instance, restarting")
 			_ = p.Stop(ctx)
 		} else {
@@ -326,12 +326,12 @@ func (p *IINAPlayer) writeSock(data []byte, requestID int) error {
 }
 
 func (p *IINAPlayer) writeSockAndRead(data []byte, requestID int) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.sockPath == "" {
 		return nil, fmt.Errorf("iina ipc socket path is empty")
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	data = append(data, '\n')
 
@@ -396,12 +396,12 @@ func (p *IINAPlayer) writeSockAndRead(data []byte, requestID int) (any, error) {
 			}
 			return resp.Data, nil
 		}
-		
+
 		// If we broke out of inner loop due to error (lastErr set), we continue outer loop to retry
 		if lastErr != nil {
 			continue
 		}
-		
+
 		// If we are here, we returned from inner loop successfully
 		// Unreachable because of return statements inside
 	}

@@ -5,6 +5,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/tr1v3r/pkg/log"
@@ -22,6 +23,26 @@ func durationToTime(seconds float64) string {
 	m := int((seconds - float64(h*3600)) / 60)
 	s := int(seconds - float64(h*3600) - float64(m*60))
 	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+func timeToSeconds(t string) (float64, error) {
+	parts := strings.Split(t, ":")
+	if len(parts) != 3 {
+		return 0, fmt.Errorf("invalid time format: %s", t)
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, err
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, err
+	}
+	s, err := strconv.ParseFloat(parts[2], 64)
+	if err != nil {
+		return 0, err
+	}
+	return float64(h)*3600 + float64(m)*60 + s, nil
 }
 
 // CurrentURIMetaData:
@@ -119,6 +140,36 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			}()
 			WriteSOAPResponse(w, AVTransportType, "StopResponse", "")
 
+		case "Seek":
+			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
+				WriteSOAPError(w, 712, "Session in use")
+				return
+			}
+			unit := XMLText(body, "Unit")
+			target := XMLText(body, "Target")
+
+			if unit != "REL_TIME" && unit != "ABS_TIME" {
+				// We mainly support REL_TIME/ABS_TIME which are time strings
+				// For now treat them same
+				WriteSOAPError(w, 710, "Seek mode not supported")
+				return
+			}
+
+			seconds, err := timeToSeconds(target)
+			if err != nil {
+				log.CtxError(ctx, "parse seek target error: %v target=%s", err, target)
+				WriteSOAPError(w, 711, "Illegal seek target")
+				return
+			}
+
+			go func() {
+				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
+				if err := st.GetPlayer(playerKey).Seek(ctx, seconds); err != nil {
+					log.CtxError(ctx, "player seek error: %v", err)
+				}
+			}()
+			WriteSOAPResponse(w, AVTransportType, "SeekResponse", "")
+
 		case "GetTransportInfo":
 			state := st.GetTransportState()
 			status := "OK"
@@ -131,7 +182,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			trackDur := "00:00:00"
 			relTime := "00:00:00"
 			absTime := "00:00:00"
-			
+
 			// Try to get actual duration and position from active player
 			if p := st.GetActivePlayer(); p != nil {
 				if d, err := p.GetDuration(ctx); err == nil {
@@ -143,16 +194,21 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				}
 			}
 
-			uri, meta := st.GetURI()
-			
+			uri, _ := st.GetURI()
+
+			// 暂时清空 MetaData，排除格式问题
+			// meta = ""
+
 			resp := fmt.Sprintf(`<Track>%s</Track>
 <TrackDuration>%s</TrackDuration>
-<TrackMetaData>%s</TrackMetaData>
+<TrackMetaData></TrackMetaData>
 <TrackURI>%s</TrackURI>
 <RelTime>%s</RelTime>
 <AbsTime>%s</AbsTime>
-<RelCount>2147483647</RelCount>
-<AbsCount>2147483647</AbsCount>`, track, trackDur, html.EscapeString(meta), html.EscapeString(uri), relTime, absTime)
+<RelCount>0</RelCount>
+<AbsCount>0</AbsCount>`, track, trackDur, html.EscapeString(uri), relTime, absTime)
+			log.CtxDebug(ctx, "GetPositionInfo response duration: %s position: %s", trackDur, relTime)
+			log.CtxDebug(ctx, "GetPositionInfo full response: %s", resp)
 			WriteSOAPResponse(w, AVTransportType, "GetPositionInfoResponse", resp)
 
 		case "GetMediaInfo":
@@ -164,7 +220,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 					mediaDur = durationToTime(d)
 				}
 			}
-			
+
 			resp := fmt.Sprintf(`<NrTracks>%s</NrTracks>
 <MediaDuration>%s</MediaDuration>
 <CurrentURI>%s</CurrentURI>
