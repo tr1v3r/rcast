@@ -70,6 +70,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			"--keep-running",
 			"--mpv-input-ipc-server="+p.sockPath,
 			"--mpv-volume="+strconv.Itoa(volume),
+			"--mpv-keep-open=yes",
 			// --mpv-title=, not work
 			// --mpv-fs,
 			// --mpv-start={start},
@@ -113,6 +114,19 @@ func (p *IINAPlayer) Pause(ctx context.Context) error {
 	})
 	if err := p.writeSock(data); err != nil {
 		return fmt.Errorf("calling iina pause failed: %w", err)
+	}
+	return nil
+}
+
+func (p *IINAPlayer) Resume(ctx context.Context) error {
+	p.requestIDCount++
+
+	data, _ := json.Marshal(MPVJSONIPCRequest{
+		RequestID: p.requestIDCount,
+		Command:   []any{"set_property", "pause", false},
+	})
+	if err := p.writeSock(data); err != nil {
+		return fmt.Errorf("calling iina resume failed: %w", err)
 	}
 	return nil
 }
@@ -217,6 +231,19 @@ func (p *IINAPlayer) SetSpeed(ctx context.Context, speed float64) error {
 	return nil
 }
 
+func (p *IINAPlayer) Seek(ctx context.Context, seconds float64) error {
+	p.requestIDCount++
+
+	data, _ := json.Marshal(MPVJSONIPCRequest{
+		RequestID: p.requestIDCount,
+		Command:   []any{"seek", seconds, "absolute"},
+	})
+	if err := p.writeSock(data); err != nil {
+		return fmt.Errorf("calling iina seek failed: %w", err)
+	}
+	return nil
+}
+
 func (p *IINAPlayer) writeSock(data []byte) error {
 	if p.sockPath == "" {
 		return fmt.Errorf("iina ipc socket path is empty")
@@ -224,35 +251,53 @@ func (p *IINAPlayer) writeSock(data []byte) error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.conn == nil {
-		if conn, err := p.connect(p.sockPath); err != nil {
-			return err
-		} else {
-			p.conn = conn
-			p.reader = bufio.NewReader(conn)
-		}
-	}
 
 	data = append(data, '\n')
 
-	if _, err := p.conn.Write(data); err != nil {
-		return fmt.Errorf("writing to iina ipc socket fail: %w", err)
+	var lastErr error
+	// Try up to 2 times (1 initial + 1 retry)
+	for range 2 {
+		if p.conn == nil {
+			if conn, err := p.connect(p.sockPath); err != nil {
+				// If we can't connect, no point retrying immediately usually,
+				// but if it's a retry attempt, we return the error.
+				lastErr = err
+				continue
+			} else {
+				p.conn = conn
+				p.reader = bufio.NewReader(conn)
+			}
+		}
+
+		if _, err := p.conn.Write(data); err != nil {
+			lastErr = fmt.Errorf("writing to iina ipc socket fail: %w", err)
+			_ = p.conn.Close()
+			p.conn = nil
+			p.reader = nil
+			continue
+		}
+
+		// 读取一行响应（如 {"error":"success", ...}）
+		respBytes, err := p.reader.ReadBytes('\n')
+		if err != nil {
+			lastErr = fmt.Errorf("reading from iina ipc socket fail: %w", err)
+			_ = p.conn.Close()
+			p.conn = nil
+			p.reader = nil
+			continue
+		}
+
+		var resp MPVJSONIPCResponse
+		if err := json.Unmarshal(respBytes, &resp); err != nil {
+			return fmt.Errorf("unmarshal iina ipc response fail: %w", err)
+		}
+		if resp.Error != "success" {
+			return fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
+		}
+		return nil
 	}
 
-	// 读取一行响应（如 {"error":"success", ...}）
-	respBytes, err := p.reader.ReadBytes('\n')
-	if err != nil {
-		return fmt.Errorf("reading from iina ipc socket fail: %w", err)
-	}
-
-	var resp MPVJSONIPCResponse
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return fmt.Errorf("unmarshal iina ipc response fail: %w", err)
-	}
-	if resp.Error != "success" {
-		return fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
-	}
-	return nil
+	return lastErr
 }
 
 func (*IINAPlayer) findIINA() (string, string, error) {
