@@ -2,6 +2,7 @@ package upnp
 
 import (
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"strings"
@@ -16,10 +17,10 @@ func ParseSOAPAction(sa string) string {
 }
 
 func WriteSOAPOK(w http.ResponseWriter, respName string) {
-	WriteSOAPOKWithBody(w, respName, "")
+	WriteSOAPResponse(w, AVTransportType, respName, "")
 }
 
-func WriteSOAPOKWithBody(w http.ResponseWriter, respName, inner string) {
+func WriteSOAPResponse(w http.ResponseWriter, namespace, respName, inner string) {
 	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
 
 	var builder strings.Builder
@@ -30,7 +31,9 @@ func WriteSOAPOKWithBody(w http.ResponseWriter, respName, inner string) {
   <s:Body>
     <u:`)
 	builder.WriteString(respName)
-	builder.WriteString(` xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">`)
+	builder.WriteString(` xmlns:u="`)
+	builder.WriteString(namespace)
+	builder.WriteString(`">`)
 	builder.WriteString(inner)
 	builder.WriteString(`</u:`)
 	builder.WriteString(respName)
@@ -89,7 +92,13 @@ func XMLText(b []byte, tag string) string {
 	if j < 0 {
 		return ""
 	}
-	return strings.TrimSpace(s[i : i+j])
+	content := strings.TrimSpace(s[i : i+j])
+	// UPnP arguments are often XML-escaped. We should unescape them to get the raw string.
+	// But be careful: if it's CDATA or just plain text, unescape might change meaning if not intended.
+	// For CurrentURIMetaData, it's definitely escaped XML.
+	// For CurrentURI, it's a URL, also might be escaped (&amp;).
+	// Let's unescape it here.
+	return html.UnescapeString(content)
 }
 
 func ControllerID(r *http.Request) string {

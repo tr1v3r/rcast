@@ -10,8 +10,8 @@ type MPVJSONIPCRequest struct {
 }
 
 type MPVJSONIPCResponse struct {
-	ID    int    `json:"id,omitempty"`
-	Error string `json:"error"`
+	RequestID int    `json:"request_id,omitempty"`
+	Error     string `json:"error"`
 
 	Data  any    `json:"data,omitempty"`
 	Event string `json:"event,omitempty"`

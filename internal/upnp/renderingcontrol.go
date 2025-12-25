@@ -47,11 +47,11 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 				_ = player.SetSystemOutputVolume(v)
 			}
 			st.SetVolume(v)
-			WriteSOAPOK(w, "SetVolumeResponse")
+			WriteSOAPResponse(w, RenderingType, "SetVolumeResponse", "")
 
 		case "GetVolume":
 			v := st.GetVolume()
-			WriteSOAPOKWithBody(w, "GetVolumeResponse", fmt.Sprintf("<CurrentVolume>%d</CurrentVolume>", v))
+			WriteSOAPResponse(w, RenderingType, "GetVolumeResponse", fmt.Sprintf("<CurrentVolume>%d</CurrentVolume>", v))
 
 		case "SetMute":
 			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
@@ -68,7 +68,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 				_ = player.SetSystemMute(m)
 			}
 			st.SetMute(m)
-			WriteSOAPOK(w, "SetMuteResponse")
+			WriteSOAPResponse(w, RenderingType, "SetMuteResponse", "")
 
 		case "GetMute":
 			m := st.GetMute()
@@ -76,7 +76,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			if m {
 				val = "1"
 			}
-			WriteSOAPOKWithBody(w, "GetMuteResponse", fmt.Sprintf("<CurrentMute>%s</CurrentMute>", val))
+			WriteSOAPResponse(w, RenderingType, "GetMuteResponse", fmt.Sprintf("<CurrentMute>%s</CurrentMute>", val))
 
 		default:
 			WriteSOAPError(w, 401, "Invalid Action")
