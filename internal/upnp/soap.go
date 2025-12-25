@@ -2,6 +2,7 @@ package upnp
 
 import (
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"strings"
@@ -91,7 +92,13 @@ func XMLText(b []byte, tag string) string {
 	if j < 0 {
 		return ""
 	}
-	return strings.TrimSpace(s[i : i+j])
+	content := strings.TrimSpace(s[i : i+j])
+	// UPnP arguments are often XML-escaped. We should unescape them to get the raw string.
+	// But be careful: if it's CDATA or just plain text, unescape might change meaning if not intended.
+	// For CurrentURIMetaData, it's definitely escaped XML.
+	// For CurrentURI, it's a URL, also might be escaped (&amp;).
+	// Let's unescape it here.
+	return html.UnescapeString(content)
 }
 
 func ControllerID(r *http.Request) string {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/tr1v3r/pkg/log"
 
@@ -24,7 +25,28 @@ func ConnectionManagerHandler(st *state.PlayerState, cfg config.Config) http.Han
 		case "GetProtocolInfo":
 			// We support http-get for various types. 
 			// Commonly supported types for a renderer.
-			sink := "http-get:*:video/mp4:*,http-get:*:video/mpeg:*,http-get:*:video/x-ms-wmv:*,http-get:*:video/x-ms-avi:*,http-get:*:video/mkv:*,http-get:*:audio/mpeg:*"
+			// DLNA.ORG_OP=01 means range seek supported
+			// DLNA.ORG_FLAGS=01700000000000000000000000000000 means various support flags (streaming, etc)
+			dlnaParams := "DLNA.ORG_PN=AVC_MP4_BL_CIF15_AAC_520;DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+			
+			// Construct sink string with DLNA params for common types
+			types := []string{
+				"video/mp4",
+				"video/mpeg",
+				"video/x-ms-wmv",
+				"video/x-ms-avi",
+				"video/mkv",
+				"audio/mpeg",
+				"application/x-mpegurl",
+				"application/vnd.apple.mpegurl",
+			}
+			
+			var sinks []string
+			for _, t := range types {
+				sinks = append(sinks, fmt.Sprintf("http-get:*:%s:%s", t, dlnaParams))
+			}
+			
+			sink := "http-get:*:*:*,http-get:*:video/*:*," + fmt.Sprint(strings.Join(sinks, ","))
 			source := "" // We are a renderer (sink), not a source.
 			
 			resp := fmt.Sprintf("<Source>%s</Source><Sink>%s</Sink>", source, sink)
