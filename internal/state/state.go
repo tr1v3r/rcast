@@ -68,6 +68,7 @@ func (s *PlayerState) GetPlayer(key string) player.Player {
 		return entry.player
 	}
 }
+
 func (s *PlayerState) RemovePlayer(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
