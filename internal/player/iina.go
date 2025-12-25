@@ -244,9 +244,46 @@ func (p *IINAPlayer) Seek(ctx context.Context, seconds float64) error {
 	return nil
 }
 
+func (p *IINAPlayer) GetPosition(ctx context.Context) (float64, error) {
+	val, err := p.getProperty("time-pos")
+	if err != nil {
+		return 0, err
+	}
+	if v, ok := val.(float64); ok {
+		return v, nil
+	}
+	return 0, fmt.Errorf("unexpected type for time-pos: %T", val)
+}
+
+func (p *IINAPlayer) GetDuration(ctx context.Context) (float64, error) {
+	val, err := p.getProperty("duration")
+	if err != nil {
+		return 0, err
+	}
+	if v, ok := val.(float64); ok {
+		return v, nil
+	}
+	return 0, fmt.Errorf("unexpected type for duration: %T", val)
+}
+
+func (p *IINAPlayer) getProperty(name string) (any, error) {
+	p.requestIDCount++
+	data, _ := json.Marshal(MPVJSONIPCRequest{
+		RequestID: p.requestIDCount,
+		Command:   []any{"get_property", name},
+	})
+
+	return p.writeSockAndRead(data)
+}
+
 func (p *IINAPlayer) writeSock(data []byte) error {
+	_, err := p.writeSockAndRead(data)
+	return err
+}
+
+func (p *IINAPlayer) writeSockAndRead(data []byte) (any, error) {
 	if p.sockPath == "" {
-		return fmt.Errorf("iina ipc socket path is empty")
+		return nil, fmt.Errorf("iina ipc socket path is empty")
 	}
 
 	p.mu.Lock()
@@ -259,8 +296,6 @@ func (p *IINAPlayer) writeSock(data []byte) error {
 	for range 2 {
 		if p.conn == nil {
 			if conn, err := p.connect(p.sockPath); err != nil {
-				// If we can't connect, no point retrying immediately usually,
-				// but if it's a retry attempt, we return the error.
 				lastErr = err
 				continue
 			} else {
@@ -289,15 +324,15 @@ func (p *IINAPlayer) writeSock(data []byte) error {
 
 		var resp MPVJSONIPCResponse
 		if err := json.Unmarshal(respBytes, &resp); err != nil {
-			return fmt.Errorf("unmarshal iina ipc response fail: %w", err)
+			return nil, fmt.Errorf("unmarshal iina ipc response fail: %w", err)
 		}
 		if resp.Error != "success" {
-			return fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
+			return nil, fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
 		}
-		return nil
+		return resp.Data, nil
 	}
 
-	return lastErr
+	return nil, lastErr
 }
 
 func (*IINAPlayer) findIINA() (string, string, error) {
@@ -312,80 +347,3 @@ func (*IINAPlayer) findIINA() (string, string, error) {
 
 	return "/Applications/IINA.app", "/Applications/IINA.app/Contents/MacOS/iina", nil
 }
-
-// func findIINA() (string, string) {
-// 	if _, err := os.Stat("/opt/homebrew/bin/iina-cli"); err == nil {
-// 		return "/Applications/IINA.app/Contents/MacOS/iina", "/opt/homebrew/bin/iina-cli"
-// 	}
-// 	if _, err := os.Stat("/usr/local/bin/iina-cli"); err == nil {
-// 		return "/Applications/IINA.app/Contents/MacOS/iina", "/usr/local/bin/iina-cli"
-// 	}
-
-// 	return "/Applications/IINA.app/Contents/MacOS/iina", ""
-// }
-
-// func Play(uri string) error {
-// 	app, cli := findIINA()
-// 	if cli != "" {
-// 		return exec.Command(cli, uri).Start()
-// 	}
-// 	if _, err := os.Stat(app); err == nil {
-// 		return exec.Command(app, "--no-stdin", uri).Start()
-// 	}
-// 	script := fmt.Sprintf(`tell application "IINA"
-//         activate
-//         open location "%s"
-//     end tell`, escapeAppleScript(uri))
-// 	return exec.Command("osascript", "-e", script).Start()
-// }
-
-// func Pause() error {
-// 	script := `tell application "IINA" to pause`
-// 	return exec.Command("osascript", "-e", script).Run()
-// }
-
-// func Stop() error {
-// 	script := `tell application "IINA" to stop`
-// 	return exec.Command("osascript", "-e", script).Run()
-// }
-
-// func SetVolume(v int) error {
-// 	// 设置 IINA 内部音量
-// 	return iinaSetVolume(v)
-// }
-
-// func SetMute(m bool) error {
-// 	return iinaSetMute(m)
-// }
-
-// func iinaSetVolume(v int) error {
-// 	script := fmt.Sprintf(`tell application "IINA"
-//         if exists current player then
-//             set volume of current player to %d
-//         else
-//             activate
-//         end if
-//     end tell`, v)
-// 	return exec.Command("osascript", "-e", script).Run()
-// }
-
-// func iinaSetMute(m bool) error {
-// 	val := "false"
-// 	if m {
-// 		val = "true"
-// 	}
-// 	script := fmt.Sprintf(`tell application "IINA"
-//         if exists current player then
-//             set mute of current player to %s
-//         else
-//             activate
-//         end if
-//     end tell`, val)
-// 	return exec.Command("osascript", "-e", script).Run()
-// }
-
-// func escapeAppleScript(s string) string {
-// 	r := strings.ReplaceAll(s, `\`, `\\`)
-// 	r = strings.ReplaceAll(r, `"`, `\"`)
-// 	return r
-// }

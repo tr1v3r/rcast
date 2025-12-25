@@ -1,6 +1,8 @@
 package upnp
 
 import (
+	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +13,16 @@ import (
 	"github.com/tr1v3r/rcast/internal/monitoring"
 	"github.com/tr1v3r/rcast/internal/state"
 )
+
+func durationToTime(seconds float64) string {
+	if seconds < 0 {
+		return "00:00:00"
+	}
+	h := int(seconds / 3600)
+	m := int((seconds - float64(h*3600)) / 60)
+	s := int(seconds - float64(h*3600) - float64(m*60))
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
 
 // CurrentURIMetaData:
 // <DIDL-Lite
@@ -50,7 +62,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			uri := XMLText(body, "CurrentURI")
 			meta := XMLText(body, "CurrentURIMetaData")
 			st.SetURI(uri, meta)
-			WriteSOAPOK(w, "SetAVTransportURIResponse")
+			WriteSOAPResponse(w, AVTransportType, "SetAVTransportURIResponse", "")
 
 		case "Play":
 			if !st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
@@ -77,7 +89,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				}
 				st.SetTransportState("PLAYING")
 			}()
-			WriteSOAPOK(w, "PlayResponse")
+			WriteSOAPResponse(w, AVTransportType, "PlayResponse", "")
 
 		case "Pause":
 			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
@@ -90,7 +102,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				_ = st.GetPlayer(playerKey).Pause(ctx)
 				st.SetTransportState("PAUSED_PLAYBACK")
 			}()
-			WriteSOAPOK(w, "PauseResponse")
+			WriteSOAPResponse(w, AVTransportType, "PauseResponse", "")
 
 		case "Stop":
 			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
@@ -105,7 +117,72 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				st.SetTransportState("STOPPED")
 				st.ReleaseSession()
 			}()
-			WriteSOAPOK(w, "StopResponse")
+			WriteSOAPResponse(w, AVTransportType, "StopResponse", "")
+
+		case "GetTransportInfo":
+			state := st.GetTransportState()
+			status := "OK"
+			speed := "1"
+			resp := fmt.Sprintf("<CurrentTransportState>%s</CurrentTransportState><CurrentTransportStatus>%s</CurrentTransportStatus><CurrentSpeed>%s</CurrentSpeed>", state, status, speed)
+			WriteSOAPResponse(w, AVTransportType, "GetTransportInfoResponse", resp)
+
+		case "GetPositionInfo":
+			track := "0"
+			trackDur := "00:00:00"
+			relTime := "00:00:00"
+			absTime := "00:00:00"
+			
+			// Try to get actual duration and position from active player
+			if p := st.GetActivePlayer(); p != nil {
+				if d, err := p.GetDuration(ctx); err == nil {
+					trackDur = durationToTime(d)
+				}
+				if pos, err := p.GetPosition(ctx); err == nil {
+					relTime = durationToTime(pos)
+					absTime = relTime
+				}
+			}
+
+			uri, meta := st.GetURI()
+			
+			resp := fmt.Sprintf(`<Track>%s</Track>
+<TrackDuration>%s</TrackDuration>
+<TrackMetaData>%s</TrackMetaData>
+<TrackURI>%s</TrackURI>
+<RelTime>%s</RelTime>
+<AbsTime>%s</AbsTime>
+<RelCount>2147483647</RelCount>
+<AbsCount>2147483647</AbsCount>`, track, trackDur, html.EscapeString(meta), html.EscapeString(uri), relTime, absTime)
+			WriteSOAPResponse(w, AVTransportType, "GetPositionInfoResponse", resp)
+
+		case "GetMediaInfo":
+			uri, meta := st.GetURI()
+			nrTracks := "1"
+			mediaDur := "00:00:00"
+			if p := st.GetActivePlayer(); p != nil {
+				if d, err := p.GetDuration(ctx); err == nil {
+					mediaDur = durationToTime(d)
+				}
+			}
+			
+			resp := fmt.Sprintf(`<NrTracks>%s</NrTracks>
+<MediaDuration>%s</MediaDuration>
+<CurrentURI>%s</CurrentURI>
+<CurrentURIMetaData>%s</CurrentURIMetaData>
+<NextURI></NextURI>
+<NextURIMetaData></NextURIMetaData>
+<PlayMedium>NETWORK</PlayMedium>
+<RecordMedium>NOT_IMPLEMENTED</RecordMedium>
+<WriteStatus>NOT_IMPLEMENTED</WriteStatus>`, nrTracks, mediaDur, html.EscapeString(uri), html.EscapeString(meta))
+			WriteSOAPResponse(w, AVTransportType, "GetMediaInfoResponse", resp)
+
+		case "GetTransportSettings":
+			resp := `<PlayMode>NORMAL</PlayMode><RecQualityMode>NOT_IMPLEMENTED</RecQualityMode>`
+			WriteSOAPResponse(w, AVTransportType, "GetTransportSettingsResponse", resp)
+
+		case "GetDeviceCapabilities":
+			resp := `<PlayMedia>NETWORK</PlayMedia><RecMedia>NOT_IMPLEMENTED</RecMedia><RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>`
+			WriteSOAPResponse(w, AVTransportType, "GetDeviceCapabilitiesResponse", resp)
 
 		default:
 			WriteSOAPError(w, 401, "Invalid Action")

@@ -29,13 +29,19 @@ func RegisterHTTP(mux *http.ServeMux, baseURL, deviceUUID string, st *state.Play
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 		_, _ = w.Write([]byte(upnp.SCPDRenderingXML()))
 	})
+	mux.HandleFunc("/upnp/service/connectionmanager.xml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		_, _ = w.Write([]byte(upnp.SCPDConnectionManagerXML()))
+	})
 
 	mux.HandleFunc("/upnp/control/avtransport", upnp.AVTransportHandler(st, cfg))
 	mux.HandleFunc("/upnp/control/renderingcontrol", upnp.RenderingControlHandler(st, cfg))
+	mux.HandleFunc("/upnp/control/connectionmanager", upnp.ConnectionManagerHandler(st, cfg))
 
-	// 事件端点占位
-	mux.HandleFunc("/upnp/event/avtransport", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/upnp/event/renderingcontrol", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	// 事件端点
+	mux.HandleFunc("/upnp/event/avtransport", upnp.EventHandler)
+	mux.HandleFunc("/upnp/event/renderingcontrol", upnp.EventHandler)
+	mux.HandleFunc("/upnp/event/connectionmanager", upnp.EventHandler)
 
 	// 根
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
