@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tr1v3r/pkg/log"
@@ -20,7 +21,7 @@ import (
 
 const sockPathPrefix = "/tmp/rcast_iina-ipc-sock_"
 
-func NewIINAPlayer() *IINAPlayer { return new(IINAPlayer) }
+func NewIINAPlayer(fullscreen bool) *IINAPlayer { return &IINAPlayer{fullscreen: fullscreen} }
 
 type IINAPlayer struct {
 	mu       sync.Mutex
@@ -30,7 +31,8 @@ type IINAPlayer struct {
 
 	requestIDCount int
 
-	process *os.Process
+	process    *os.Process
+	fullscreen bool
 }
 
 func (p *IINAPlayer) Close(_ context.Context) error {
@@ -90,6 +92,9 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			})
 			if err := p.writeSock(data, p.requestIDCount); err == nil {
 				_ = p.SetVolume(ctx, volume)
+				if p.fullscreen {
+					_ = p.SetFullscreen(ctx, true)
+				}
 				return nil
 			} else {
 				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
@@ -110,20 +115,26 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	} else if cli != "" {
 		p.sockPath = sockPathPrefix + uuid.NewString()
 		// open -a IINA --args --mpv-input-ipc-server=/tmp/iina-ipc.sock --keep-running
-		cmd := exec.CommandContext(ctx, cli,
+		args := []string{
 			"--keep-running",
-			"--mpv-input-ipc-server="+p.sockPath,
-			"--mpv-volume="+strconv.Itoa(volume),
+			"--mpv-input-ipc-server=" + p.sockPath,
+			"--mpv-volume=" + strconv.Itoa(volume),
 			"--mpv-keep-open=yes",
 			// --mpv-title=, not work
-			// --mpv-fs,
 			// --mpv-start={start},
-			uri)
+		}
+		if p.fullscreen {
+			args = append(args, "--mpv-fs=yes")
+		}
+		args = append(args, uri)
+
+		cmd := exec.CommandContext(ctx, cli, args...)
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("failed to start iina-cli: %w", err)
 		}
 		p.conn = nil
 		p.process = cmd.Process
+		p.enforceFullscreen(ctx)
 	} else if app != "" {
 		if _, err := os.Stat(app); err != nil {
 			return fmt.Errorf("IINA not found at %s: %w", app, err)
@@ -420,4 +431,26 @@ func (*IINAPlayer) findIINA() (string, string, error) {
 	// TODO check if IINA is installed in Applications folder
 
 	return "/Applications/IINA.app", "/Applications/IINA.app/Contents/MacOS/iina", nil
+}
+
+func (p *IINAPlayer) enforceFullscreen(ctx context.Context) {
+	if !p.fullscreen {
+		return
+	}
+
+	// Try to set fullscreen property
+	// Retry a few times as IPC might not be ready immediately after process start
+	go func() {
+		// Wait a bit for IINA/MPV to initialize
+		time.Sleep(2 * time.Second)
+
+		for i := 0; i < 10; i++ {
+			if err := p.SetFullscreen(context.Background(), true); err == nil {
+				log.CtxDebug(ctx, "enforce fullscreen success")
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		log.CtxWarn(ctx, "enforce fullscreen failed after retries")
+	}()
 }

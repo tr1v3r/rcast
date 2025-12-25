@@ -18,6 +18,22 @@ Includes session ownership (single-controller at a time) and optional system vol
 - Optional macOS system volume linkage (via AppleScript, darwin only)
 - Static UUID persistence for stable discovery identity
 
+## Usage
+
+```bash
+# Run with default settings
+rcast
+
+# Enable debug logging
+rcast --debug
+
+# Open IINA in fullscreen mode
+rcast --fullscreen
+
+# Show help
+rcast --help
+```
+
 ## Architecture
 
 - internal/config: configuration and env overrides

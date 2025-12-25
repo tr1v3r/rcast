@@ -7,11 +7,13 @@ import (
 
 	"github.com/tr1v3r/pkg/log"
 
+	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/player"
 )
 
 type PlayerState struct {
 	ctx context.Context
+	cfg config.Config
 
 	mu             sync.RWMutex
 	players        map[string]*playerEntry
@@ -31,9 +33,10 @@ type playerEntry struct {
 	createdAt time.Time
 }
 
-func New(ctx context.Context) *PlayerState {
+func New(ctx context.Context, cfg config.Config) *PlayerState {
 	return &PlayerState{
 		ctx:     ctx,
+		cfg:     cfg,
 		players: make(map[string]*playerEntry),
 
 		TransportState: "STOPPED",
@@ -57,7 +60,7 @@ func (s *PlayerState) GetPlayer(key string) player.Player {
 		return entry.player
 	} else {
 		entry := &playerEntry{
-			player:    player.NewIINAPlayer(),
+			player:    player.NewIINAPlayer(s.cfg.IINAFullscreen),
 			lastUsed:  now,
 			createdAt: now,
 		}
