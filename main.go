@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tr1v3r/pkg/log"
+	"github.com/urfave/cli/v3"
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/httpserver"
@@ -22,15 +23,41 @@ import (
 const serverName = "RCast-DMR/1.1" // "GoDLNA-DMR/1.1"
 
 func main() {
-	ctx := context.Background()
 	defer log.Close()
-
-	if debug := len(os.Args) > 1 && os.Args[1] == "--debug"; debug {
-		log.SetLevel(log.DebugLevel)
-	}
 
 	cfg := config.Load()
 
+	cmd := &cli.Command{
+		Name:  "rcast",
+		Usage: "RCast DMR",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "debug",
+				Usage: "enable debug logging",
+			},
+			&cli.BoolFlag{
+				Name:    "fullscreen",
+				Aliases: []string{"fs"},
+				Usage:   "open iina in fullscreen",
+				Value:   cfg.IINAFullscreen,
+			},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			if cmd.Bool("debug") {
+				log.SetLevel(log.DebugLevel)
+			}
+			cfg.IINAFullscreen = cmd.Bool("fullscreen")
+
+			return runServer(ctx, cfg)
+		},
+	}
+
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		log.Fatal("run app failed: %v", err)
+	}
+}
+
+func runServer(ctx context.Context, cfg config.Config) error {
 	// 设备 UUID
 	deviceUUID, err := uuid.LoadOrCreate(cfg.UUIDPath, config.DefaultUUID)
 	if err != nil {
@@ -42,12 +69,12 @@ func main() {
 	ip, err := netutil.FirstUsableIPv4()
 	if err != nil {
 		log.Error("no IPv4: %v", err)
-		return
+		return err
 	}
 	baseURL := fmt.Sprintf("http://%s:%d", ip, cfg.HTTPPort)
 
 	// 状态
-	st := state.New(ctx)
+	st := state.New(ctx, cfg)
 	defer st.Stop()
 
 	// HTTP
@@ -69,7 +96,6 @@ func main() {
 		log.Info("HTTP listening on %s", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Error("HTTP error: %v", err)
-			return
 		}
 	}()
 
@@ -82,4 +108,6 @@ func main() {
 	defer cancel2()
 	_ = srv.Shutdown(ctxShutdown)
 	log.Info("bye")
+
+	return nil
 }

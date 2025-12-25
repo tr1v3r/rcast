@@ -31,7 +31,7 @@ func EventHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		
+
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}

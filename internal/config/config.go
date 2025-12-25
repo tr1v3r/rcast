@@ -17,6 +17,7 @@ type Config struct {
 	AllowSessionPreempt    bool
 	LinkSystemOutputVolume bool
 	HTTPPort               int
+	IINAFullscreen         bool
 }
 
 func Load() Config {
@@ -25,6 +26,7 @@ func Load() Config {
 		AllowSessionPreempt:    envVar("DMR_ALLOW_PREEMPT", true),
 		LinkSystemOutputVolume: envVar("DMR_LINK_SYSTEM_VOLUME", false),
 		HTTPPort:               envVar("DMR_HTTP_PORT", DefaultPort),
+		IINAFullscreen:         envVar("DMR_IINA_FULLSCREEN", false),
 	}
 
 	// Validate configuration

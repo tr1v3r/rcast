@@ -20,7 +20,7 @@ import (
 
 const sockPathPrefix = "/tmp/rcast_iina-ipc-sock_"
 
-func NewIINAPlayer() *IINAPlayer { return new(IINAPlayer) }
+func NewIINAPlayer(fullscreen bool) *IINAPlayer { return &IINAPlayer{fullscreen: fullscreen} }
 
 type IINAPlayer struct {
 	mu       sync.Mutex
@@ -30,7 +30,8 @@ type IINAPlayer struct {
 
 	requestIDCount int
 
-	process *os.Process
+	process    *os.Process
+	fullscreen bool
 }
 
 func (p *IINAPlayer) Close(_ context.Context) error {
@@ -110,15 +111,20 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	} else if cli != "" {
 		p.sockPath = sockPathPrefix + uuid.NewString()
 		// open -a IINA --args --mpv-input-ipc-server=/tmp/iina-ipc.sock --keep-running
-		cmd := exec.CommandContext(ctx, cli,
+		args := []string{
 			"--keep-running",
-			"--mpv-input-ipc-server="+p.sockPath,
-			"--mpv-volume="+strconv.Itoa(volume),
+			"--mpv-input-ipc-server=" + p.sockPath,
+			"--mpv-volume=" + strconv.Itoa(volume),
 			"--mpv-keep-open=yes",
 			// --mpv-title=, not work
-			// --mpv-fs,
 			// --mpv-start={start},
-			uri)
+		}
+		if p.fullscreen {
+			args = append(args, "--mpv-fs=yes")
+		}
+		args = append(args, uri)
+
+		cmd := exec.CommandContext(ctx, cli, args...)
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("failed to start iina-cli: %w", err)
 		}

@@ -37,7 +37,7 @@ func GetMetrics() *Metrics {
 	metricsOnce.Do(func() {
 		globalMetrics = &Metrics{
 			HTTPRequestsByMethod: make(map[string]int64),
-			startTime:           time.Now(),
+			startTime:            time.Now(),
 		}
 	})
 	return globalMetrics

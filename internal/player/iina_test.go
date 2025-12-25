@@ -10,7 +10,7 @@ import (
 
 func TestIINAPlayer_Integration(t *testing.T) {
 	// This integration test requires IINA to be installed and a video file.
-	
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("Could not get user home dir")
@@ -21,7 +21,7 @@ func TestIINAPlayer_Integration(t *testing.T) {
 		t.Skipf("Test file %s not found, skipping integration test", testFile)
 	}
 
-	p := NewIINAPlayer()
+	p := NewIINAPlayer(false)
 	ctx := context.Background()
 
 	t.Logf("Playing %s", testFile)
