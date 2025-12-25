@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/google/uuid"
 	"github.com/tr1v3r/pkg/log"
@@ -61,6 +62,49 @@ func (p *IINAPlayer) Close(_ context.Context) error {
 
 func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	log.CtxDebug(ctx, "IINAPlayer Play: uri=%s volume=%d", uri, volume)
+
+	p.mu.Lock()
+	proc := p.process
+	p.mu.Unlock()
+
+	if proc != nil {
+		if err := proc.Signal(syscall.Signal(0)); err == nil {
+			// Process is running, try to reuse
+			// Check if same file
+			if val, err := p.getProperty("path"); err == nil {
+				if currentPath, ok := val.(string); ok && currentPath == uri {
+					_ = p.SetVolume(ctx, volume)
+					return p.Resume(ctx)
+				} else {
+					log.CtxDebug(ctx, "path mismatch or invalid type: current=%v target=%s", val, uri)
+				}
+			} else {
+				log.CtxDebug(ctx, "get path property failed: %v", err)
+			}
+
+			// Load new file or fallback
+			p.requestIDCount++
+			data, _ := json.Marshal(MPVJSONIPCRequest{
+				RequestID: p.requestIDCount,
+				Command:   []any{"loadfile", uri, "replace"},
+			})
+			if err := p.writeSock(data, p.requestIDCount); err == nil {
+				_ = p.SetVolume(ctx, volume)
+				return nil
+			} else {
+				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
+			}
+			
+			log.CtxWarn(ctx, "failed to reuse IINA instance, restarting")
+			_ = p.Stop(ctx)
+		} else {
+			log.CtxWarn(ctx, "existing process not running: %v", err)
+			p.mu.Lock()
+			p.process = nil
+			p.mu.Unlock()
+		}
+	}
+
 	if app, cli, err := p.findIINA(); err != nil {
 		return fmt.Errorf("IINA not found: %w", err)
 	} else if cli != "" {
@@ -112,7 +156,7 @@ func (p *IINAPlayer) Pause(ctx context.Context) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "pause", true},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina pause failed: %w", err)
 	}
 	return nil
@@ -125,7 +169,7 @@ func (p *IINAPlayer) Resume(ctx context.Context) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "pause", false},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina resume failed: %w", err)
 	}
 	return nil
@@ -160,7 +204,7 @@ func (p *IINAPlayer) SetVolume(ctx context.Context, v int) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "volume", v},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina set volume failed: %w", err)
 	}
 	return nil
@@ -173,7 +217,7 @@ func (p *IINAPlayer) SetMute(ctx context.Context, m bool) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "mute", m},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina set volume failed: %w", err)
 	}
 	return nil
@@ -186,7 +230,7 @@ func (p *IINAPlayer) SetFullscreen(ctx context.Context, f bool) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "fullscreen", f},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina set fullscreen failed: %w", err)
 	}
 	return nil
@@ -199,7 +243,7 @@ func (p *IINAPlayer) SetTitle(ctx context.Context, title string) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "title", title},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina set fullscreen failed: %w", err)
 	}
 	return nil
@@ -212,7 +256,7 @@ func (p *IINAPlayer) Screenshot(ctx context.Context, path string) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"screenshot"},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina screenshot failed: %w", err)
 	}
 	return nil
@@ -225,7 +269,7 @@ func (p *IINAPlayer) SetSpeed(ctx context.Context, speed float64) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"set_property", "speed", speed},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina set speed failed: %w", err)
 	}
 	return nil
@@ -238,7 +282,7 @@ func (p *IINAPlayer) Seek(ctx context.Context, seconds float64) error {
 		RequestID: p.requestIDCount,
 		Command:   []any{"seek", seconds, "absolute"},
 	})
-	if err := p.writeSock(data); err != nil {
+	if err := p.writeSock(data, p.requestIDCount); err != nil {
 		return fmt.Errorf("calling iina seek failed: %w", err)
 	}
 	return nil
@@ -273,15 +317,15 @@ func (p *IINAPlayer) getProperty(name string) (any, error) {
 		Command:   []any{"get_property", name},
 	})
 
-	return p.writeSockAndRead(data)
+	return p.writeSockAndRead(data, p.requestIDCount)
 }
 
-func (p *IINAPlayer) writeSock(data []byte) error {
-	_, err := p.writeSockAndRead(data)
+func (p *IINAPlayer) writeSock(data []byte, requestID int) error {
+	_, err := p.writeSockAndRead(data, requestID)
 	return err
 }
 
-func (p *IINAPlayer) writeSockAndRead(data []byte) (any, error) {
+func (p *IINAPlayer) writeSockAndRead(data []byte, requestID int) (any, error) {
 	if p.sockPath == "" {
 		return nil, fmt.Errorf("iina ipc socket path is empty")
 	}
@@ -312,24 +356,54 @@ func (p *IINAPlayer) writeSockAndRead(data []byte) (any, error) {
 			continue
 		}
 
-		// 读取一行响应（如 {"error":"success", ...}）
-		respBytes, err := p.reader.ReadBytes('\n')
-		if err != nil {
-			lastErr = fmt.Errorf("reading from iina ipc socket fail: %w", err)
-			_ = p.conn.Close()
-			p.conn = nil
-			p.reader = nil
+		// Read responses until we find the one matching our request ID
+		// or timeout (we don't have timeout here but blocked read, hopefully IINA responds)
+		for {
+			respBytes, err := p.reader.ReadBytes('\n')
+			if err != nil {
+				lastErr = fmt.Errorf("reading from iina ipc socket fail: %w", err)
+				_ = p.conn.Close()
+				p.conn = nil
+				p.reader = nil
+				break // Break inner loop, retry outer loop
+			}
+
+			var resp MPVJSONIPCResponse
+			if err := json.Unmarshal(respBytes, &resp); err != nil {
+				// Failed to parse, maybe log warning and continue?
+				// For now, if unmarshal fails, it's likely fatal for this message
+				// But we continue reading in case it was noise
+				log.Warn("unmarshal iina ipc response fail: %v data=%s", err, string(respBytes))
+				continue
+			}
+
+			// Check if this is an event
+			if resp.Event != "" {
+				// Ignore events for now
+				continue
+			}
+
+			// Check if this matches our request ID
+			if resp.RequestID != requestID {
+				// Mismatch ID, maybe stale response or unsolicited?
+				// Continue reading
+				continue
+			}
+
+			// Found our response
+			if resp.Error != "success" {
+				return nil, fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
+			}
+			return resp.Data, nil
+		}
+		
+		// If we broke out of inner loop due to error (lastErr set), we continue outer loop to retry
+		if lastErr != nil {
 			continue
 		}
-
-		var resp MPVJSONIPCResponse
-		if err := json.Unmarshal(respBytes, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal iina ipc response fail: %w", err)
-		}
-		if resp.Error != "success" {
-			return nil, fmt.Errorf("iina ipc response error: %s %s", resp.Error, string(respBytes))
-		}
-		return resp.Data, nil
+		
+		// If we are here, we returned from inner loop successfully
+		// Unreachable because of return statements inside
 	}
 
 	return nil, lastErr
