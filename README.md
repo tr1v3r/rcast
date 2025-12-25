@@ -29,6 +29,8 @@ rcast --debug
 
 # Open IINA in fullscreen mode
 rcast --fullscreen
+# or use the short form
+rcast --fs
 
 # Show help
 rcast --help

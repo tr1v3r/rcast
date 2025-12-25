@@ -36,9 +36,10 @@ func main() {
 				Usage: "enable debug logging",
 			},
 			&cli.BoolFlag{
-				Name:  "fullscreen",
-				Usage: "open iina in fullscreen",
-				Value: cfg.IINAFullscreen,
+				Name:    "fullscreen",
+				Aliases: []string{"fs"},
+				Usage:   "open iina in fullscreen",
+				Value:   cfg.IINAFullscreen,
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
