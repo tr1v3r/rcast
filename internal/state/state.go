@@ -121,6 +121,30 @@ func (s *PlayerState) SetTransportState(st string) {
 	s.TransportState = st
 }
 
+func (s *PlayerState) GetTransportState() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.TransportState
+}
+
+func (s *PlayerState) GetActivePlayer() player.Player {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.SessionOwner == "" {
+		// If no session owner, try to find any active player or return nil
+		// For simplicity, just return nil if no session.
+		// Alternatively, return the first player found?
+		for _, entry := range s.players {
+			return entry.player
+		}
+		return nil
+	}
+	if entry, ok := s.players[s.SessionOwner]; ok {
+		return entry.player
+	}
+	return nil
+}
+
 func (s *PlayerState) GetVolume() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

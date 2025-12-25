@@ -16,10 +16,10 @@ func ParseSOAPAction(sa string) string {
 }
 
 func WriteSOAPOK(w http.ResponseWriter, respName string) {
-	WriteSOAPOKWithBody(w, respName, "")
+	WriteSOAPResponse(w, AVTransportType, respName, "")
 }
 
-func WriteSOAPOKWithBody(w http.ResponseWriter, respName, inner string) {
+func WriteSOAPResponse(w http.ResponseWriter, namespace, respName, inner string) {
 	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
 
 	var builder strings.Builder
@@ -30,7 +30,9 @@ func WriteSOAPOKWithBody(w http.ResponseWriter, respName, inner string) {
   <s:Body>
     <u:`)
 	builder.WriteString(respName)
-	builder.WriteString(` xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">`)
+	builder.WriteString(` xmlns:u="`)
+	builder.WriteString(namespace)
+	builder.WriteString(`">`)
 	builder.WriteString(inner)
 	builder.WriteString(`</u:`)
 	builder.WriteString(respName)
