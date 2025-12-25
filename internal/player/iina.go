@@ -128,6 +128,8 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 		}
 		args = append(args, uri)
 
+		log.CtxInfo(ctx, "executing iina command: %s %v", cli, args)
+
 		cmd := exec.CommandContext(ctx, cli, args...)
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("failed to start iina-cli: %w", err)
