@@ -143,6 +143,26 @@ func TestIINAPlayer_CommandAndGetProperty(t *testing.T) {
 	}
 }
 
+func TestIINAPlayer_PlayReuseActivatesWindow(t *testing.T) {
+	s := newFakeMPVServer(t)
+	defer s.close()
+	const uri = "https://example.test/video.mp4"
+	s.setProp("path", uri)
+	p := playerOnSocket(t, s)
+	activated := 0
+	p.activate = func(context.Context) error {
+		activated++
+		return nil
+	}
+
+	if err := p.Play(context.Background(), uri, 50); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if activated != 1 {
+		t.Fatalf("activation count=%d, want 1", activated)
+	}
+}
+
 // TestIINAPlayer_ConcurrentSend races many commands on a shared player. Under
 // the old code this tripped the -race detector (requestIDCount was mutated
 // outside the lock); the locked allocation in send() must keep it clean.

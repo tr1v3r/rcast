@@ -26,7 +26,12 @@ const sockPathPrefix = "/tmp/rcast_iina-ipc-sock_"
 // It is a var (not a const) so tests can shrink it.
 var ipcTimeout = 3 * time.Second
 
-func NewIINAPlayer(fullscreen bool) *IINAPlayer { return &IINAPlayer{fullscreen: fullscreen} }
+func NewIINAPlayer(fullscreen bool) *IINAPlayer {
+	return &IINAPlayer{
+		fullscreen: fullscreen,
+		activate:   activateIINA,
+	}
+}
 
 type IINAPlayer struct {
 	mu       sync.Mutex
@@ -38,6 +43,7 @@ type IINAPlayer struct {
 
 	command    *exec.Cmd
 	fullscreen bool
+	activate   func(context.Context) error
 }
 
 func (p *IINAPlayer) Close(_ context.Context) error {
@@ -92,7 +98,11 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 		if val, err := p.getProperty(ctx, "path"); err == nil {
 			if currentPath, ok := val.(string); ok && currentPath == uri {
 				_ = p.SetVolume(ctx, volume)
-				return p.Resume(ctx)
+				if err := p.Resume(ctx); err != nil {
+					return err
+				}
+				p.bringToFront(ctx)
+				return nil
 			} else {
 				log.CtxDebug(ctx, "path mismatch or invalid type: current=%v target=%s", val, uri)
 			}
@@ -100,6 +110,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			// Load the new file into the running instance.
 			if err := p.sendOK(ctx, []any{"loadfile", uri, "replace"}, "loadfile"); err == nil {
 				_ = p.SetVolume(ctx, volume)
+				p.bringToFront(ctx)
 				return nil
 			} else {
 				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
@@ -148,7 +159,25 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 		_ = p.Stop(ctx)
 		return fmt.Errorf("waiting for IINA IPC: %w", err)
 	}
+	p.bringToFront(ctx)
 	return nil
+}
+
+func activateIINA(ctx context.Context) error {
+	return exec.CommandContext(ctx, "open", "-a", "IINA").Run()
+}
+
+func (p *IINAPlayer) bringToFront(ctx context.Context) {
+	if p.activate == nil {
+		return
+	}
+	activateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := p.activate(activateCtx); err != nil {
+		// Playback is already ready at this point, so focus failure should not
+		// turn a successful cast into a SOAP error.
+		log.CtxWarn(ctx, "activate IINA window: %v", err)
+	}
 }
 
 func (p *IINAPlayer) wait(cmd *exec.Cmd) {
