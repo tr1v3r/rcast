@@ -10,7 +10,9 @@ Rcast is a lightweight DLNA/UPnP AV MediaRenderer (DMR) written in Go for macOS.
 
 ### Building
 ```bash
-go build -o rcast main.go
+go build -o rcast main.go          # plain build
+make build                          # canonical: versioned binary to output/bin (stripped, ldflags-injected)
+make build-dev                      # unstripped dev binary with debug info
 ```
 
 ### Running
@@ -20,15 +22,31 @@ go build -o rcast main.go
 
 # Debug mode with verbose logging
 ./rcast --debug
+
+# Open IINA fullscreen (also: --fs)
+./rcast --fullscreen
+
+# Via Make: build + run, or dev build + run with --debug
+make run
+make run-dev
 ```
 
 ### Testing
 ```bash
-# Run tests (if any exist)
+# Run tests
 go test ./...
 
 # Run tests with verbose output
 go test -v ./...
+```
+
+### Code Quality (via Makefile)
+```bash
+make test-coverage   # race + HTML coverage report
+make lint            # golangci-lint run
+make vet             # go vet ./...
+make fmt             # goimports-reviser -format ./...
+make dev             # full workflow: tidy fmt vet lint test build
 ```
 
 ## Architecture
@@ -37,6 +55,7 @@ go test -v ./...
 
 - **main.go**: Application entry point - initializes configuration, network, state management, HTTP server, and SSDP discovery
 - **internal/config**: Configuration management with environment variable overrides
+- **internal/monitoring**: In-process metrics for HTTP, player, and UPnP activity (singleton `Metrics`)
 - **internal/state**: Thread-safe player and session state management
 - **internal/player**: IINA and macOS system volume control integration
 - **internal/upnp**: SOAP helpers, service descriptions, AVTransport/RenderingControl handlers
@@ -52,6 +71,8 @@ Environment variables:
 - `DMR_ALLOW_PREEMPT`: Allow session preemption (default: `true`)
 - `DMR_LINK_SYSTEM_VOLUME`: Link to macOS system volume (default: `false`)
 - `DMR_HTTP_PORT`: HTTP server port (default: `8200`)
+- `DMR_ADVERTISE_IP`: IPv4 address to advertise when automatic interface selection is unsuitable
+- `DMR_IINA_FULLSCREEN`: Open IINA in fullscreen (default: `false`; also settable via `--fullscreen`/`--fs`)
 
 ### Session Management
 
@@ -65,19 +86,21 @@ The application implements session ownership with single-controller-at-a-time se
 The player component integrates with IINA through multiple methods:
 - Prefers `iina-cli` if available (Homebrew or local installation)
 - Falls back to direct IINA app execution
-- Uses IPC sockets for advanced control (pause, volume, etc.)
-- Supports both command-line and AppleScript control methods
+- Controls playback via **mpv JSON IPC** over a Unix socket (`/tmp/rcast_iina-ipc-sock_*`); IINA is mpv-based, so it speaks the mpv IPC protocol. IPC types live in `internal/player/mpv.go`.
+- AppleScript is used **only** for macOS system volume linkage (`internal/player/system_volume_darwin.go`), not playback control.
 
 ### UPnP Services
 
-- **AVTransport**: SetAVTransportURI, Play, Pause, Stop
+- **AVTransport**: SetAVTransportURI, Play, Pause, Stop, Seek, plus Get*Info queries (PositionInfo, TransportInfo, MediaInfo, DeviceCapabilities)
 - **RenderingControl**: SetVolume/GetVolume, SetMute/GetMute
+- **ConnectionManager**: GetProtocolInfo
+- **Eventing (GENA)**: Not currently implemented; event endpoints return HTTP 501 instead of issuing unusable subscriptions
 - **SSDP Discovery**: Automatic device announcement and search response
 
 ## Development Notes
 
 - The codebase is written in Go 1.25.3
-- Uses `github.com/tr1v3r/pkg/log` for structured logging
+- Key deps: `github.com/tr1v3r/pkg/log` (logging), `github.com/urfave/cli/v3` (CLI flags), `github.com/google/uuid`
 - Thread-safe state management with sync.RWMutex
 - macOS-specific features (system volume control) are isolated in Darwin-specific files
 - UUID persistence ensures stable device identity across restarts

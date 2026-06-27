@@ -3,9 +3,15 @@ package ssdp
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/upnp"
 )
@@ -14,8 +20,9 @@ const ssdpAddr = "239.255.255.250:1900"
 
 func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 	addr, _ := net.ResolveUDPAddr("udp4", ssdpAddr)
-	conn, err := net.DialUDP("udp4", nil, addr)
+	conn, err := net.DialUDP("udp4", advertisedLocalAddr(baseURL), addr)
 	if err != nil {
+		log.CtxError(ctx, "SSDP announce socket: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -24,6 +31,7 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 		{upnp.DeviceType, deviceUUID + "::" + upnp.DeviceType},
 		{upnp.AVTransportType, deviceUUID + "::" + upnp.AVTransportType},
 		{upnp.RenderingType, deviceUUID + "::" + upnp.RenderingType},
+		{upnp.ConnectionManagerType, deviceUUID + "::" + upnp.ConnectionManagerType},
 		{"upnp:rootdevice", deviceUUID + "::upnp:rootdevice"},
 		{deviceUUID, deviceUUID},
 	}
@@ -58,21 +66,35 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 	}
 }
 
+func advertisedLocalAddr(baseURL string) *net.UDPAddr {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	if ip == nil || ip.To4() == nil {
+		return nil
+	}
+	return &net.UDPAddr{IP: ip.To4()}
+}
+
 func SearchResponder(ctx context.Context, baseURL, deviceUUID, serverName string) {
 	addr, err := net.ResolveUDPAddr("udp4", ssdpAddr)
 	if err != nil {
+		log.CtxError(ctx, "resolve SSDP address: %v", err)
 		return
 	}
 	l, err := net.ListenMulticastUDP("udp4", nil, addr)
 	if err != nil {
+		log.CtxError(ctx, "listen SSDP multicast: %v", err)
 		return
 	}
 	defer l.Close()
 	if err := l.SetReadBuffer(65536); err != nil {
-		// Log buffer setting error but continue
-		return
+		log.CtxWarn(ctx, "set SSDP read buffer: %v", err)
 	}
 	buf := make([]byte, 8192)
+	responders := make(chan struct{}, 32)
 
 	for {
 		l.SetDeadline(time.Now().Add(2 * time.Second))
@@ -97,20 +119,65 @@ func SearchResponder(ctx context.Context, baseURL, deviceUUID, serverName string
 		if st == "" {
 			continue
 		}
-		valid := st == "ssdp:all" || st == "upnp:rootdevice" || st == upnp.DeviceType || st == upnp.AVTransportType || st == upnp.RenderingType || st == deviceUUID
+		valid := st == "ssdp:all" || st == "upnp:rootdevice" || st == upnp.DeviceType || st == upnp.AVTransportType || st == upnp.RenderingType || st == upnp.ConnectionManagerType || st == deviceUUID
 		if !valid {
 			continue
 		}
-		usn := deviceUUID
-		if st != deviceUUID && st != "ssdp:all" {
-			usn = deviceUUID + "::" + st
+		mx := 1
+		if parsed, err := strconv.Atoi(headerValue(text, "MX")); err == nil {
+			mx = min(max(parsed, 1), 5)
 		}
-		maxAge := 1800
-		resp := fmt.Sprintf(
-			"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=%d\r\nDATE: %s\r\nEXT:\r\nLOCATION: %s/device.xml\r\nSERVER: %s\r\nST: %s\r\nUSN: %s\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n",
-			maxAge, time.Now().UTC().Format(time.RFC1123), baseURL, serverName, st, usn)
-		_, _ = l.WriteToUDP([]byte(resp), src)
+		select {
+		case responders <- struct{}{}:
+			srcCopy := *src
+			go func() {
+				defer func() { <-responders }()
+				delay := time.Duration(rand.Int63n(int64(time.Duration(mx) * time.Second)))
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+				}
+				for _, target := range responseTargets(st, deviceUUID) {
+					resp := fmt.Sprintf(
+						"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nDATE: %s\r\nEXT:\r\nLOCATION: %s/device.xml\r\nSERVER: %s\r\nST: %s\r\nUSN: %s\r\nBOOTID.UPNP.ORG: 1\r\nCONFIGID.UPNP.ORG: 1\r\n\r\n",
+						time.Now().UTC().Format(http.TimeFormat), baseURL, serverName, target.st, target.usn)
+					if _, err := l.WriteToUDP([]byte(resp), &srcCopy); err != nil && ctx.Err() == nil {
+						log.CtxWarn(ctx, "write SSDP response: %v", err)
+					}
+				}
+			}()
+		default:
+			log.CtxWarn(ctx, "dropping SSDP search response: responder limit reached")
+		}
 	}
+}
+
+type responseTarget struct {
+	st  string
+	usn string
+}
+
+func responseTargets(requested, deviceUUID string) []responseTarget {
+	all := []responseTarget{
+		{"upnp:rootdevice", deviceUUID + "::upnp:rootdevice"},
+		{deviceUUID, deviceUUID},
+		{upnp.DeviceType, deviceUUID + "::" + upnp.DeviceType},
+		{upnp.AVTransportType, deviceUUID + "::" + upnp.AVTransportType},
+		{upnp.RenderingType, deviceUUID + "::" + upnp.RenderingType},
+		{upnp.ConnectionManagerType, deviceUUID + "::" + upnp.ConnectionManagerType},
+	}
+	if requested == "ssdp:all" {
+		return all
+	}
+	for _, target := range all {
+		if target.st == requested {
+			return []responseTarget{target}
+		}
+	}
+	return nil
 }
 
 func headerValue(raw, key string) string {

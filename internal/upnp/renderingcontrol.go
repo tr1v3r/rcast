@@ -2,7 +2,6 @@ package upnp
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,7 +17,10 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
 		sa := ParseSOAPAction(r.Header.Get("SOAPACTION"))
-		body, _ := io.ReadAll(r.Body)
+		body, ok := ReadSOAPBody(w, r)
+		if !ok {
+			return
+		}
 		controller := ControllerID(r)
 
 		log.CtxDebug(ctx, "get request header: %+v", r.Header)
@@ -26,49 +28,67 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 
 		switch sa {
 		case "SetVolume":
-			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
-				WriteSOAPError(w, 712, "Session in use")
+			vStr := XMLText(body, "DesiredVolume")
+			v, err := strconv.Atoi(vStr)
+			if err != nil {
+				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
-			vStr := XMLText(body, "DesiredVolume")
-			v, _ := strconv.Atoi(vStr)
 			if v < 0 {
 				v = 0
 			}
 			if v > 100 {
 				v = 100
 			}
-			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetVolume(ctx, v); err != nil {
-				WriteSOAPError(w, 501, "Action Failed")
-				log.CtxError(ctx, "iina set volume error: %v", err)
-				return
-			}
-			if cfg.LinkSystemOutputVolume {
-				_ = player.SetSystemOutputVolume(v)
-			}
-			st.SetVolume(v)
-			WriteSOAPResponse(w, RenderingType, "SetVolumeResponse", "")
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
+				}
+				if p := st.GetActivePlayer(); p != nil {
+					if err := p.SetVolume(ctx, v); err != nil {
+						WriteSOAPError(w, 501, "Action Failed")
+						log.CtxError(ctx, "iina set volume error: %v", err)
+						return
+					}
+				}
+				if cfg.LinkSystemOutputVolume {
+					if err := player.SetSystemOutputVolume(v); err != nil {
+						log.CtxWarn(ctx, "set system volume: %v", err)
+					}
+				}
+				st.SetVolume(v)
+				WriteSOAPResponse(w, RenderingType, "SetVolumeResponse", "")
+			})
 
 		case "GetVolume":
 			v := st.GetVolume()
 			WriteSOAPResponse(w, RenderingType, "GetVolumeResponse", fmt.Sprintf("<CurrentVolume>%d</CurrentVolume>", v))
 
 		case "SetMute":
-			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
-				WriteSOAPError(w, 712, "Session in use")
-				return
-			}
 			mStr := strings.ToLower(XMLText(body, "DesiredMute"))
-			m := mStr == "1" || mStr == "true"
-			if err := st.GetPlayer(strings.SplitN(r.RemoteAddr, ":", 2)[0]).SetMute(ctx, m); err != nil {
-				WriteSOAPError(w, 501, "Action Failed")
+			if mStr != "0" && mStr != "1" && mStr != "false" && mStr != "true" {
+				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
-			if cfg.LinkSystemOutputVolume {
-				_ = player.SetSystemMute(m)
-			}
-			st.SetMute(m)
-			WriteSOAPResponse(w, RenderingType, "SetMuteResponse", "")
+			m := mStr == "1" || mStr == "true"
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
+				}
+				if p := st.GetActivePlayer(); p != nil {
+					if err := p.SetMute(ctx, m); err != nil {
+						WriteSOAPError(w, 501, "Action Failed")
+						return
+					}
+				}
+				if cfg.LinkSystemOutputVolume {
+					if err := player.SetSystemMute(m); err != nil {
+						log.CtxWarn(ctx, "set system mute: %v", err)
+					}
+				}
+				st.SetMute(m)
+				WriteSOAPResponse(w, RenderingType, "SetMuteResponse", "")
+			})
 
 		case "GetMute":
 			m := st.GetMute()

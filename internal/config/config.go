@@ -2,12 +2,11 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 const (
-	DefaultUUID     = "uuid:0199ffd9-6856-74cc-a2f2-4c74af0161b1"
 	DefaultPort     = 8200
 	DefaultUUIDPath = ".local/rcast/dmr_uuid.txt"
 )
@@ -17,15 +16,18 @@ type Config struct {
 	AllowSessionPreempt    bool
 	LinkSystemOutputVolume bool
 	HTTPPort               int
+	AdvertiseIP            string
 	IINAFullscreen         bool
 }
 
 func Load() Config {
+	home, _ := os.UserHomeDir()
 	cfg := Config{
-		UUIDPath:               envVar("DMR_UUID_PATH", os.Getenv("HOME")+"/"+DefaultUUIDPath),
+		UUIDPath:               envVar("DMR_UUID_PATH", filepath.Join(home, DefaultUUIDPath)),
 		AllowSessionPreempt:    envVar("DMR_ALLOW_PREEMPT", true),
 		LinkSystemOutputVolume: envVar("DMR_LINK_SYSTEM_VOLUME", false),
 		HTTPPort:               envVar("DMR_HTTP_PORT", DefaultPort),
+		AdvertiseIP:            envVar("DMR_ADVERTISE_IP", ""),
 		IINAFullscreen:         envVar("DMR_IINA_FULLSCREEN", false),
 	}
 
@@ -71,15 +73,4 @@ func (c *Config) validate() {
 		c.HTTPPort = DefaultPort
 	}
 
-	// Ensure UUID path directory exists
-	if c.UUIDPath != "" {
-		// Extract directory from path
-		if idx := strings.LastIndex(c.UUIDPath, "/"); idx > 0 {
-			dir := c.UUIDPath[:idx]
-			if _, err := os.Stat(dir); os.IsNotExist(err) {
-				// Create directory if it doesn't exist
-				os.MkdirAll(dir, 0755)
-			}
-		}
-	}
 }

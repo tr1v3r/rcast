@@ -144,8 +144,8 @@ func SCPDAVTransportXML() string {
     </action>
   </actionList>
   <serviceStateTable>
-    <stateVariable sendEvents="yes"><name>TransportState</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="yes"><name>TransportStatus</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>TransportState</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>TransportStatus</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>PlaybackStorageMedium</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>RecordStorageMedium</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>PossiblePlaybackStorageMedia</name><dataType>string</dataType></stateVariable>
@@ -256,9 +256,9 @@ func SCPDConnectionManagerXML() string {
     </action>
   </actionList>
   <serviceStateTable>
-    <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="yes"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable>

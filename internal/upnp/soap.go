@@ -1,12 +1,17 @@
 package upnp
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"html"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 )
+
+const maxSOAPBodyBytes = 1 << 20
 
 func ParseSOAPAction(sa string) string {
 	sa = strings.Trim(sa, "\"")
@@ -63,7 +68,7 @@ func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
 	builder.WriteString(fmt.Sprintf("%d", code))
 	builder.WriteString(`</errorCode>
           <errorDescription>`)
-	builder.WriteString(desc)
+	builder.WriteString(html.EscapeString(desc))
 	builder.WriteString(`</errorDescription>
         </UPnPError>
       </detail>
@@ -75,30 +80,37 @@ func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
 }
 
 func XMLText(b []byte, tag string) string {
-	open := "<" + tag + ">"
-	close := "</" + tag + ">"
-	s := string(b)
-	i := strings.Index(s, open)
-	if i < 0 {
-		open = "<u:" + tag + ">"
-		close = "</u:" + tag + ">"
-		i = strings.Index(s, open)
-		if i < 0 {
+	decoder := xml.NewDecoder(bytes.NewReader(b))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
 			return ""
 		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != tag {
+			continue
+		}
+		var value string
+		if err := decoder.DecodeElement(&value, &start); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(value)
 	}
-	i += len(open)
-	j := strings.Index(s[i:], close)
-	if j < 0 {
-		return ""
+}
+
+func ReadSOAPBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return nil, false
 	}
-	content := strings.TrimSpace(s[i : i+j])
-	// UPnP arguments are often XML-escaped. We should unescape them to get the raw string.
-	// But be careful: if it's CDATA or just plain text, unescape might change meaning if not intended.
-	// For CurrentURIMetaData, it's definitely escaped XML.
-	// For CurrentURI, it's a URL, also might be escaped (&amp;).
-	// Let's unescape it here.
-	return html.UnescapeString(content)
+	r.Body = http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		WriteSOAPError(w, 402, "Invalid Args")
+		return nil, false
+	}
+	return body, true
 }
 
 func ControllerID(r *http.Request) string {
