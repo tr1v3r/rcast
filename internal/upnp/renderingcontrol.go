@@ -13,6 +13,11 @@ import (
 	"github.com/tr1v3r/rcast/internal/state"
 )
 
+// Aweme on iOS exposes eight system volume steps but changes the UPnP value by
+// five points per step. 100 / (8 * 5) expands that 40-point logical range to
+// the player's full 0-100 range.
+const awemeIOSVolumeScale = 2.5
+
 func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
@@ -22,6 +27,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			return
 		}
 		controller := ControllerID(r)
+		volumeScale := volumeScaleForUserAgent(r.UserAgent())
 
 		log.CtxDebug(ctx, "get request header: %+v", r.Header)
 		log.CtxDebug(ctx, "get request body: %s", string(body))
@@ -44,24 +50,28 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
+				appliedVolume := st.PreviewVolumeRequest(controller, v, volumeScale)
 				if p := st.GetActivePlayer(); p != nil {
-					if err := p.SetVolume(ctx, v); err != nil {
+					if err := p.SetVolume(ctx, appliedVolume); err != nil {
 						WriteSOAPError(w, 501, "Action Failed")
 						log.CtxError(ctx, "iina set volume error: %v", err)
 						return
 					}
 				}
 				if cfg.LinkSystemOutputVolume {
-					if err := player.SetSystemOutputVolume(v); err != nil {
+					if err := player.SetSystemOutputVolume(appliedVolume); err != nil {
 						log.CtxWarn(ctx, "set system volume: %v", err)
 					}
 				}
-				st.SetVolume(v)
+				st.CommitVolumeRequest(controller, v, volumeScale)
+				if volumeScale > 1 {
+					log.CtxDebug(ctx, "mapped controller volume raw=%d applied=%d user_agent=%s", v, appliedVolume, r.UserAgent())
+				}
 				WriteSOAPResponse(w, RenderingType, "SetVolumeResponse", "")
 			})
 
 		case "GetVolume":
-			v := st.GetVolume()
+			v := st.GetReportedVolume(controller, volumeScale)
 			WriteSOAPResponse(w, RenderingType, "GetVolumeResponse", fmt.Sprintf("<CurrentVolume>%d</CurrentVolume>", v))
 
 		case "SetMute":
@@ -102,4 +112,12 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			WriteSOAPError(w, 401, "Invalid Action")
 		}
 	}
+}
+
+func volumeScaleForUserAgent(userAgent string) float64 {
+	ua := strings.ToLower(userAgent)
+	if strings.HasPrefix(ua, "aweme/") && strings.Contains(ua, "cfnetwork/") && strings.Contains(ua, "darwin/") {
+		return awemeIOSVolumeScale
+	}
+	return 1
 }

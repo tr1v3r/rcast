@@ -13,6 +13,7 @@ Includes session ownership (single-controller at a time) and optional system vol
 - IINA integration
   - Uses iina-cli if available, otherwise starts the IINA app binary
   - Controls playback through mpv JSON IPC
+  - Normalizes the eight-step Douyin iOS volume control to IINA's full range
 - Session ownership
   - Single active controller per session
   - Configurable preemption policy
