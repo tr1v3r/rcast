@@ -8,6 +8,7 @@ import (
 	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/monitoring"
 	"github.com/tr1v3r/rcast/internal/player"
 )
 
@@ -34,7 +35,7 @@ type playerEntry struct {
 }
 
 func New(ctx context.Context, cfg config.Config) *PlayerState {
-	return &PlayerState{
+	s := &PlayerState{
 		ctx:     ctx,
 		cfg:     cfg,
 		players: make(map[string]*playerEntry),
@@ -42,6 +43,25 @@ func New(ctx context.Context, cfg config.Config) *PlayerState {
 		TransportState: "STOPPED",
 		Volume:         50,
 		Mute:           false,
+	}
+	go s.reaper()
+	return s
+}
+
+// reaper periodically evicts idle players and clears the session when its owner
+// is evicted. It runs until ctx (the app context) is cancelled.
+func (s *PlayerState) reaper() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			s.cleanupExpiredPlayersLocked()
+			s.mu.Unlock()
+		}
 	}
 }
 
@@ -51,22 +71,20 @@ func (s *PlayerState) GetPlayer(key string) player.Player {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Clean up expired players first
-	s.cleanupExpiredPlayers()
-
 	now := time.Now()
 	if entry, ok := s.players[key]; ok {
 		entry.lastUsed = now
 		return entry.player
-	} else {
-		entry := &playerEntry{
-			player:    player.NewIINAPlayer(s.cfg.IINAFullscreen),
-			lastUsed:  now,
-			createdAt: now,
-		}
-		s.players[key] = entry
-		return entry.player
 	}
+
+	entry := &playerEntry{
+		player:    player.NewIINAPlayer(s.cfg.IINAFullscreen),
+		lastUsed:  now,
+		createdAt: now,
+	}
+	s.players[key] = entry
+	monitoring.GetMetrics().RecordPlayerSession()
+	return entry.player
 }
 
 func (s *PlayerState) RemovePlayer(key string) {
@@ -79,16 +97,20 @@ func (s *PlayerState) RemovePlayer(key string) {
 	}
 }
 
-// cleanupExpiredPlayers removes players that haven't been used for more than 10 minutes
-func (s *PlayerState) cleanupExpiredPlayers() {
-	now := time.Now()
-	maxAge := 10 * time.Minute // Players expire after 10 minutes of inactivity
+const playerMaxIdle = 10 * time.Minute // players are evicted after this much inactivity
 
+// cleanupExpiredPlayersLocked removes idle players and releases the session when
+// its owner is evicted. Caller must hold s.mu.
+func (s *PlayerState) cleanupExpiredPlayersLocked() {
+	now := time.Now()
 	for key, entry := range s.players {
-		if now.Sub(entry.lastUsed) > maxAge {
-			// Clean up expired player
+		if now.Sub(entry.lastUsed) > playerMaxIdle {
 			_ = entry.player.Stop(s.ctx)
 			delete(s.players, key)
+			if s.SessionOwner == key {
+				s.SessionOwner = ""
+				s.SessionSince = time.Time{}
+			}
 		}
 	}
 }

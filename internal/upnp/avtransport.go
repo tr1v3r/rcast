@@ -58,6 +58,18 @@ func timeToSeconds(t string) (float64, error) {
 // 	</item>
 // </DIDL-Lite>
 
+// requireSession acquires (or, when preemption is enabled, preempts) the session
+// for a mutating transport action. On failure it records a UPnP error, writes a
+// SOAP 712 response, and returns false.
+func requireSession(w http.ResponseWriter, st *state.PlayerState, cfg config.Config, controller string) bool {
+	if st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
+		return true
+	}
+	monitoring.GetMetrics().RecordUPnPError()
+	WriteSOAPError(w, 712, "Session in use")
+	return false
+}
+
 func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
@@ -73,12 +85,8 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 
 		switch sa {
 		case "SetAVTransportURI":
-			if !st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
-				if !cfg.AllowSessionPreempt {
-					monitoring.GetMetrics().RecordUPnPError()
-					WriteSOAPError(w, 712, "Session in use")
-					return
-				}
+			if !requireSession(w, st, cfg, controller) {
+				return
 			}
 			uri := XMLText(body, "CurrentURI")
 			meta := XMLText(body, "CurrentURIMetaData")
@@ -86,11 +94,8 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "SetAVTransportURIResponse", "")
 
 		case "Play":
-			if !st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
-				if !cfg.AllowSessionPreempt {
-					WriteSOAPError(w, 712, "Session in use")
-					return
-				}
+			if !requireSession(w, st, cfg, controller) {
+				return
 			}
 			uri, _ := st.GetURI()
 			if uri == "" {
@@ -113,8 +118,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "PlayResponse", "")
 
 		case "Pause":
-			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
-				WriteSOAPError(w, 712, "Session in use")
+			if !requireSession(w, st, cfg, controller) {
 				return
 			}
 			// Pause asynchronously
@@ -126,8 +130,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "PauseResponse", "")
 
 		case "Stop":
-			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
-				WriteSOAPError(w, 712, "Session in use")
+			if !requireSession(w, st, cfg, controller) {
 				return
 			}
 			// Stop asynchronously
@@ -141,8 +144,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "StopResponse", "")
 
 		case "Seek":
-			if !st.HasSession(controller) && !cfg.AllowSessionPreempt {
-				WriteSOAPError(w, 712, "Session in use")
+			if !requireSession(w, st, cfg, controller) {
 				return
 			}
 			unit := XMLText(body, "Unit")

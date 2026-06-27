@@ -43,6 +43,12 @@ func RegisterHTTP(mux *http.ServeMux, baseURL, deviceUUID string, st *state.Play
 	mux.HandleFunc("/upnp/event/renderingcontrol", upnp.EventHandler)
 	mux.HandleFunc("/upnp/event/connectionmanager", upnp.EventHandler)
 
+	// 指标
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(monitoring.GetMetrics().RenderText()))
+	})
+
 	// 根
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -53,7 +59,7 @@ func RegisterHTTP(mux *http.ServeMux, baseURL, deviceUUID string, st *state.Play
 func LogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Enhanced logging with structured information
-		log.Info("HTTP request method=%s path=%s remote_addr=%s user_agent=%s",
+		log.Debug("HTTP request method=%s path=%s remote_addr=%s user_agent=%s",
 			r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
 
 		start := time.Now()
