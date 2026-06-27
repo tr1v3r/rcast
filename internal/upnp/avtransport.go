@@ -3,7 +3,6 @@ package upnp
 import (
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,6 +41,9 @@ func timeToSeconds(t string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if h < 0 || m < 0 || m >= 60 || s < 0 || s >= 60 {
+		return 0, fmt.Errorf("invalid time value: %s", t)
+	}
 	return float64(h)*3600 + float64(m)*60 + s, nil
 }
 
@@ -62,19 +64,31 @@ func timeToSeconds(t string) (float64, error) {
 // for a mutating transport action. On failure it records a UPnP error, writes a
 // SOAP 712 response, and returns false.
 func requireSession(w http.ResponseWriter, st *state.PlayerState, cfg config.Config, controller string) bool {
-	if st.AcquireOrCheckSession(controller, cfg.AllowSessionPreempt) {
-		return true
+	acquired, preempted := st.AcquireSession(controller, cfg.AllowSessionPreempt)
+	if !acquired {
+		monitoring.GetMetrics().RecordUPnPError()
+		WriteSOAPError(w, 712, "Session in use")
+		return false
 	}
-	monitoring.GetMetrics().RecordUPnPError()
-	WriteSOAPError(w, 712, "Session in use")
-	return false
+	if preempted {
+		if err := st.StopPlayer(); err != nil {
+			log.CtxError(st.Context(), "stop preempted player: %v", err)
+			monitoring.GetMetrics().RecordPlayerError()
+			WriteSOAPError(w, 501, "Action Failed")
+			return false
+		}
+	}
+	return true
 }
 
 func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
 		sa := ParseSOAPAction(r.Header.Get("SOAPACTION"))
-		body, _ := io.ReadAll(r.Body)
+		body, ok := ReadSOAPBody(w, r)
+		if !ok {
+			return
+		}
 		controller := ControllerID(r)
 
 		// Record UPnP action
@@ -85,68 +99,94 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 
 		switch sa {
 		case "SetAVTransportURI":
-			if !requireSession(w, st, cfg, controller) {
-				return
-			}
 			uri := XMLText(body, "CurrentURI")
-			meta := XMLText(body, "CurrentURIMetaData")
-			st.SetURI(uri, meta)
-			WriteSOAPResponse(w, AVTransportType, "SetAVTransportURIResponse", "")
-
-		case "Play":
-			if !requireSession(w, st, cfg, controller) {
-				return
-			}
-			uri, _ := st.GetURI()
 			if uri == "" {
-				monitoring.GetMetrics().RecordUPnPError()
-				WriteSOAPError(w, 714, "No content selected")
+				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
-
-			// Start playback asynchronously
-			go func() {
-				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-				if err := st.GetPlayer(playerKey).Play(ctx, uri, st.Volume); err != nil {
-					log.CtxError(ctx, "iina play error: %v", err)
-					monitoring.GetMetrics().RecordPlayerError()
-					// Note: Can't send error response here since HTTP response already sent
+			meta := XMLText(body, "CurrentURIMetaData")
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
 					return
 				}
+				if err := st.StopPlayer(); err != nil {
+					monitoring.GetMetrics().RecordPlayerError()
+					WriteSOAPError(w, 501, "Action Failed")
+					return
+				}
+				st.SetURI(uri, meta)
+				WriteSOAPResponse(w, AVTransportType, "SetAVTransportURIResponse", "")
+			})
+
+		case "Play":
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
+				}
+				uri, _ := st.GetURI()
+				if uri == "" {
+					monitoring.GetMetrics().RecordUPnPError()
+					WriteSOAPError(w, 714, "No content selected")
+					return
+				}
+				st.SetTransportState("TRANSITIONING")
+				p := st.EnsurePlayer()
+				if err := p.Play(ctx, uri, st.GetVolume()); err != nil {
+					log.CtxError(ctx, "iina play error: %v", err)
+					monitoring.GetMetrics().RecordPlayerError()
+					st.SetTransportState("STOPPED")
+					WriteSOAPError(w, 501, "Action Failed")
+					return
+				}
+				if st.GetMute() {
+					if err := p.SetMute(ctx, true); err != nil {
+						log.CtxError(ctx, "apply initial mute: %v", err)
+						monitoring.GetMetrics().RecordPlayerError()
+						_ = st.StopPlayer()
+						st.SetTransportState("STOPPED")
+						WriteSOAPError(w, 501, "Action Failed")
+						return
+					}
+				}
 				st.SetTransportState("PLAYING")
-			}()
-			WriteSOAPResponse(w, AVTransportType, "PlayResponse", "")
+				WriteSOAPResponse(w, AVTransportType, "PlayResponse", "")
+			})
 
 		case "Pause":
-			if !requireSession(w, st, cfg, controller) {
-				return
-			}
-			// Pause asynchronously
-			go func() {
-				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-				_ = st.GetPlayer(playerKey).Pause(ctx)
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
+				}
+				p := st.GetActivePlayer()
+				if p == nil {
+					WriteSOAPError(w, 701, "Transition not available")
+					return
+				}
+				if err := p.Pause(ctx); err != nil {
+					monitoring.GetMetrics().RecordPlayerError()
+					WriteSOAPError(w, 501, "Action Failed")
+					return
+				}
 				st.SetTransportState("PAUSED_PLAYBACK")
-			}()
-			WriteSOAPResponse(w, AVTransportType, "PauseResponse", "")
+				WriteSOAPResponse(w, AVTransportType, "PauseResponse", "")
+			})
 
 		case "Stop":
-			if !requireSession(w, st, cfg, controller) {
-				return
-			}
-			// Stop asynchronously
-			go func() {
-				addr := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-				_ = st.GetPlayer(addr).Stop(ctx)
-				st.RemovePlayer(addr)
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
+				}
+				if err := st.StopPlayer(); err != nil {
+					monitoring.GetMetrics().RecordPlayerError()
+					WriteSOAPError(w, 501, "Action Failed")
+					return
+				}
 				st.SetTransportState("STOPPED")
-				st.ReleaseSession()
-			}()
-			WriteSOAPResponse(w, AVTransportType, "StopResponse", "")
+				st.ReleaseSession(controller)
+				WriteSOAPResponse(w, AVTransportType, "StopResponse", "")
+			})
 
 		case "Seek":
-			if !requireSession(w, st, cfg, controller) {
-				return
-			}
 			unit := XMLText(body, "Unit")
 			target := XMLText(body, "Target")
 
@@ -164,13 +204,23 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				return
 			}
 
-			go func() {
-				playerKey := strings.SplitN(r.RemoteAddr, ":", 2)[0]
-				if err := st.GetPlayer(playerKey).Seek(ctx, seconds); err != nil {
-					log.CtxError(ctx, "player seek error: %v", err)
+			st.Serialize(func() {
+				if !requireSession(w, st, cfg, controller) {
+					return
 				}
-			}()
-			WriteSOAPResponse(w, AVTransportType, "SeekResponse", "")
+				p := st.GetActivePlayer()
+				if p == nil {
+					WriteSOAPError(w, 701, "Transition not available")
+					return
+				}
+				if err := p.Seek(ctx, seconds); err != nil {
+					log.CtxError(ctx, "player seek error: %v", err)
+					monitoring.GetMetrics().RecordPlayerError()
+					WriteSOAPError(w, 501, "Action Failed")
+					return
+				}
+				WriteSOAPResponse(w, AVTransportType, "SeekResponse", "")
+			})
 
 		case "GetTransportInfo":
 			state := st.GetTransportState()

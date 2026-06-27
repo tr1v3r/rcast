@@ -2,7 +2,6 @@ package upnp
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -16,7 +15,10 @@ func ConnectionManagerHandler(st *state.PlayerState, cfg config.Config) http.Han
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
 		sa := ParseSOAPAction(r.Header.Get("SOAPACTION"))
-		body, _ := io.ReadAll(r.Body)
+		body, ok := ReadSOAPBody(w, r)
+		if !ok {
+			return
+		}
 
 		log.CtxDebug(ctx, "cm request header: %+v", r.Header)
 		log.CtxDebug(ctx, "cm request body: %s", string(body))

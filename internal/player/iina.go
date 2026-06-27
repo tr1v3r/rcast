@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,7 +36,7 @@ type IINAPlayer struct {
 
 	requestIDCount int
 
-	process    *os.Process
+	command    *exec.Cmd
 	fullscreen bool
 }
 
@@ -83,21 +83,18 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	log.CtxDebug(ctx, "IINAPlayer Play: uri=%s volume=%d", uri, volume)
 
 	p.mu.Lock()
-	proc := p.process
+	hasEndpoint := p.sockPath != ""
 	p.mu.Unlock()
 
-	if proc != nil {
-		if err := proc.Signal(syscall.Signal(0)); err == nil {
-			// Process is alive — try to reuse the running instance.
-			if val, err := p.getProperty(ctx, "path"); err == nil {
-				if currentPath, ok := val.(string); ok && currentPath == uri {
-					_ = p.SetVolume(ctx, volume)
-					return p.Resume(ctx)
-				} else {
-					log.CtxDebug(ctx, "path mismatch or invalid type: current=%v target=%s", val, uri)
-				}
+	if hasEndpoint {
+		// iina-cli may exit after handing the request to IINA, so IPC—not the
+		// launcher process—is the source of truth for a reusable player.
+		if val, err := p.getProperty(ctx, "path"); err == nil {
+			if currentPath, ok := val.(string); ok && currentPath == uri {
+				_ = p.SetVolume(ctx, volume)
+				return p.Resume(ctx)
 			} else {
-				log.CtxDebug(ctx, "get path property failed: %v", err)
+				log.CtxDebug(ctx, "path mismatch or invalid type: current=%v target=%s", val, uri)
 			}
 
 			// Load the new file into the running instance.
@@ -107,15 +104,12 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			} else {
 				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
 			}
-
-			log.CtxWarn(ctx, "failed to reuse IINA instance, restarting")
-			_ = p.Stop(ctx)
 		} else {
-			log.CtxWarn(ctx, "existing process not running: %v", err)
-			p.mu.Lock()
-			p.process = nil
-			p.mu.Unlock()
+			log.CtxDebug(ctx, "get path property failed: %v", err)
 		}
+
+		log.CtxWarn(ctx, "failed to reuse IINA instance, restarting")
+		_ = p.Stop(ctx)
 	}
 
 	// Launch a fresh, IPC-controllable IINA instance.
@@ -147,9 +141,58 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 
 	p.mu.Lock()
 	p.conn = nil
-	p.process = cmd.Process
+	p.command = cmd
 	p.mu.Unlock()
+	go p.wait(cmd)
+	if err := p.waitForIPC(ctx, sockPath); err != nil {
+		_ = p.Stop(ctx)
+		return fmt.Errorf("waiting for IINA IPC: %w", err)
+	}
 	return nil
+}
+
+func (p *IINAPlayer) wait(cmd *exec.Cmd) {
+	_ = cmd.Wait()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.command == cmd {
+		p.command = nil
+	}
+}
+
+func (p *IINAPlayer) waitForIPC(ctx context.Context, sockPath string) error {
+	deadline := ipcDeadline(ctx)
+	var lastErr error
+	for {
+		conn, err := p.connect(sockPath)
+		if err == nil {
+			p.mu.Lock()
+			if p.sockPath != sockPath {
+				p.mu.Unlock()
+				_ = conn.Close()
+				return fmt.Errorf("IINA IPC endpoint changed while starting")
+			}
+			if p.conn == nil {
+				p.conn = conn
+				p.reader = bufio.NewReader(conn)
+			} else {
+				_ = conn.Close()
+			}
+			p.mu.Unlock()
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (p *IINAPlayer) connect(sockPath string) (net.Conn, error) {
@@ -173,20 +216,29 @@ func (p *IINAPlayer) Resume(ctx context.Context) error {
 
 func (p *IINAPlayer) Stop(ctx context.Context) error {
 	p.mu.Lock()
+	hasEndpoint := p.sockPath != ""
+	p.mu.Unlock()
+	if hasEndpoint {
+		quitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_, _ = p.send(quitCtx, []any{"quit"})
+		cancel()
+	}
+
+	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Close IPC + remove socket, then kill the process — all under one critical
-	// section so p.process is never touched without the lock.
+	// Close IPC + remove socket, then kill the process. wait() owns cmd.Wait so
+	// every child is reaped exactly once.
 	stopErr := p.closeLocked()
 
-	if p.process != nil {
-		if err := p.process.Kill(); err != nil {
+	if p.command != nil && p.command.Process != nil {
+		if err := p.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			if stopErr != nil {
 				return fmt.Errorf("multiple errors: %w, killing process: %v", stopErr, err)
 			}
 			return fmt.Errorf("killing process: %w", err)
 		}
-		p.process = nil
+		p.command = nil
 	}
 	return stopErr
 }

@@ -71,6 +71,7 @@ Environment variables:
 - `DMR_ALLOW_PREEMPT`: Allow session preemption (default: `true`)
 - `DMR_LINK_SYSTEM_VOLUME`: Link to macOS system volume (default: `false`)
 - `DMR_HTTP_PORT`: HTTP server port (default: `8200`)
+- `DMR_ADVERTISE_IP`: IPv4 address to advertise when automatic interface selection is unsuitable
 - `DMR_IINA_FULLSCREEN`: Open IINA in fullscreen (default: `false`; also settable via `--fullscreen`/`--fs`)
 
 ### Session Management
@@ -93,7 +94,7 @@ The player component integrates with IINA through multiple methods:
 - **AVTransport**: SetAVTransportURI, Play, Pause, Stop, Seek, plus Get*Info queries (PositionInfo, TransportInfo, MediaInfo, DeviceCapabilities)
 - **RenderingControl**: SetVolume/GetVolume, SetMute/GetMute
 - **ConnectionManager**: GetProtocolInfo
-- **Eventing (GENA)**: SUBSCRIBE/UNSUBSCRIBE handlers on `/upnp/event/{avtransport,renderingcontrol,connectionmanager}`
+- **Eventing (GENA)**: Not currently implemented; event endpoints return HTTP 501 instead of issuing unusable subscriptions
 - **SSDP Discovery**: Automatic device announcement and search response
 
 ## Development Notes

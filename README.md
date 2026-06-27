@@ -8,15 +8,16 @@ Includes session ownership (single-controller at a time) and optional system vol
 
 - SSDP discovery as MediaRenderer
 - UPnP services
-  - AVTransport: SetAVTransportURI, Play, Pause, Stop
+- AVTransport: SetAVTransportURI, Play, Pause, Stop, Seek, and status queries
   - RenderingControl: SetVolume/GetVolume, SetMute/GetMute
 - IINA integration
-  - Uses iina-cli if available, otherwise falls back to IINA app or AppleScript
+  - Uses iina-cli if available, otherwise starts the IINA app binary
+  - Controls playback through mpv JSON IPC
 - Session ownership
   - Single active controller per session
   - Configurable preemption policy
 - Optional macOS system volume linkage (via AppleScript, darwin only)
-- Static UUID persistence for stable discovery identity
+- Per-installation UUID persistence for stable, collision-free discovery identity
 
 ## Usage
 
@@ -35,6 +36,17 @@ rcast --fs
 # Show help
 rcast --help
 ```
+
+## Configuration
+
+Environment variables include:
+
+- `DMR_HTTP_PORT`: HTTP listen port (default `8200`)
+- `DMR_ADVERTISE_IP`: IPv4 address to advertise on multi-homed or VPN-connected Macs
+- `DMR_ALLOW_PREEMPT`: allow a new controller to take the active session
+- `DMR_LINK_SYSTEM_VOLUME`: mirror renderer volume to macOS system volume
+- `DMR_UUID_PATH`: persistent device identity path
+- `DMR_IINA_FULLSCREEN`: open IINA fullscreen
 
 ## Architecture
 

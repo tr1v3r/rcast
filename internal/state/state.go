@@ -12,44 +12,104 @@ import (
 	"github.com/tr1v3r/rcast/internal/player"
 )
 
+const playerMaxIdle = 10 * time.Minute
+
+type PlayerFactory func() player.Player
+
 type PlayerState struct {
 	ctx context.Context
-	cfg config.Config
 
-	mu             sync.RWMutex
-	players        map[string]*playerEntry
-	TransportURI   string
-	TransportMeta  string
-	TransportState string // STOPPED | PLAYING | PAUSED_PLAYBACK | TRANSITIONING
-	Volume         int
-	Mute           bool
+	commandMu sync.Mutex
+	mu        sync.RWMutex
 
-	SessionOwner string
-	SessionSince time.Time
-}
+	player         player.Player
+	playerLastUsed time.Time
+	playerFactory  PlayerFactory
 
-type playerEntry struct {
-	player    player.Player
-	lastUsed  time.Time
-	createdAt time.Time
+	transportURI   string
+	transportMeta  string
+	transportState string
+	volume         int
+	mute           bool
+
+	sessionOwner string
+	sessionSince time.Time
+	sessionUsed  time.Time
 }
 
 func New(ctx context.Context, cfg config.Config) *PlayerState {
-	s := &PlayerState{
-		ctx:     ctx,
-		cfg:     cfg,
-		players: make(map[string]*playerEntry),
+	return NewWithPlayerFactory(ctx, cfg, func() player.Player {
+		return player.NewIINAPlayer(cfg.IINAFullscreen)
+	})
+}
 
-		TransportState: "STOPPED",
-		Volume:         50,
-		Mute:           false,
+func NewWithPlayerFactory(ctx context.Context, _ config.Config, factory PlayerFactory) *PlayerState {
+	s := &PlayerState{
+		ctx:            ctx,
+		playerFactory:  factory,
+		transportState: "STOPPED",
+		volume:         50,
 	}
 	go s.reaper()
 	return s
 }
 
-// reaper periodically evicts idle players and clears the session when its owner
-// is evicted. It runs until ctx (the app context) is cancelled.
+func (s *PlayerState) Context() context.Context { return s.ctx }
+
+// Serialize ensures mutating UPnP actions execute in arrival order instead of
+// racing independent player goroutines.
+func (s *PlayerState) Serialize(fn func()) {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	fn()
+}
+
+func (s *PlayerState) EnsurePlayer() player.Player {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playerLastUsed = time.Now()
+	if s.player == nil {
+		s.player = s.playerFactory()
+		monitoring.GetMetrics().RecordPlayerSession()
+	}
+	return s.player
+}
+
+func (s *PlayerState) GetActivePlayer() player.Player {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.player != nil {
+		s.playerLastUsed = time.Now()
+	}
+	return s.player
+}
+
+func (s *PlayerState) StopPlayer() error {
+	s.mu.Lock()
+	p := s.player
+	s.player = nil
+	s.playerLastUsed = time.Time{}
+	s.mu.Unlock()
+	if p == nil {
+		return nil
+	}
+	return p.Stop(s.ctx)
+}
+
+func (s *PlayerState) Stop() {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+
+	if err := s.StopPlayer(); err != nil {
+		log.CtxInfo(s.ctx, "player stop error: %v", err)
+	}
+	s.mu.Lock()
+	s.sessionOwner = ""
+	s.sessionSince = time.Time{}
+	s.sessionUsed = time.Time{}
+	s.mu.Unlock()
+}
+
 func (s *PlayerState) reaper() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -58,172 +118,127 @@ func (s *PlayerState) reaper() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.Lock()
-			s.cleanupExpiredPlayersLocked()
-			s.mu.Unlock()
+			s.reapExpiredPlayer()
 		}
 	}
 }
 
-func (s *PlayerState) Context() context.Context { return s.ctx }
+func (s *PlayerState) reapExpiredPlayer() {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
 
-func (s *PlayerState) GetPlayer(key string) player.Player {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	if entry, ok := s.players[key]; ok {
-		entry.lastUsed = now
-		return entry.player
+	playerExpired := s.player != nil && time.Since(s.playerLastUsed) > playerMaxIdle
+	sessionExpired := s.player == nil && s.sessionOwner != "" && time.Since(s.sessionUsed) > playerMaxIdle
+	expired := playerExpired || sessionExpired
+	if expired {
+		s.sessionOwner = ""
+		s.sessionSince = time.Time{}
+		s.sessionUsed = time.Time{}
 	}
-
-	entry := &playerEntry{
-		player:    player.NewIINAPlayer(s.cfg.IINAFullscreen),
-		lastUsed:  now,
-		createdAt: now,
+	s.mu.Unlock()
+	if expired {
+		_ = s.StopPlayer()
 	}
-	s.players[key] = entry
-	monitoring.GetMetrics().RecordPlayerSession()
-	return entry.player
-}
-
-func (s *PlayerState) RemovePlayer(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if entry, ok := s.players[key]; ok {
-		// Clean up the player resources before removing
-		_ = entry.player.Stop(s.ctx)
-		delete(s.players, key)
-	}
-}
-
-const playerMaxIdle = 10 * time.Minute // players are evicted after this much inactivity
-
-// cleanupExpiredPlayersLocked removes idle players and releases the session when
-// its owner is evicted. Caller must hold s.mu.
-func (s *PlayerState) cleanupExpiredPlayersLocked() {
-	now := time.Now()
-	for key, entry := range s.players {
-		if now.Sub(entry.lastUsed) > playerMaxIdle {
-			_ = entry.player.Stop(s.ctx)
-			delete(s.players, key)
-			if s.SessionOwner == key {
-				s.SessionOwner = ""
-				s.SessionSince = time.Time{}
-			}
-		}
-	}
-}
-
-func (s *PlayerState) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, entry := range s.players {
-		if err := entry.player.Stop(s.ctx); err != nil {
-			log.CtxInfo(s.ctx, "player stop error: %v", err)
-		}
-	}
-	// Clear players map after stopping all
-	s.players = make(map[string]*playerEntry)
 }
 
 func (s *PlayerState) GetURI() (string, string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.TransportURI, s.TransportMeta
+	return s.transportURI, s.transportMeta
 }
 
 func (s *PlayerState) SetURI(uri, meta string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.TransportURI = uri
-	s.TransportMeta = meta
-	s.TransportState = "STOPPED"
+	s.transportURI = uri
+	s.transportMeta = meta
+	s.transportState = "STOPPED"
 }
 
 func (s *PlayerState) SetTransportState(st string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.TransportState = st
+	s.transportState = st
 }
 
 func (s *PlayerState) GetTransportState() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.TransportState
-}
-
-func (s *PlayerState) GetActivePlayer() player.Player {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.SessionOwner == "" {
-		// If no session owner, try to find any active player or return nil
-		// For simplicity, just return nil if no session.
-		// Alternatively, return the first player found?
-		for _, entry := range s.players {
-			return entry.player
-		}
-		return nil
-	}
-	if entry, ok := s.players[s.SessionOwner]; ok {
-		return entry.player
-	}
-	return nil
+	return s.transportState
 }
 
 func (s *PlayerState) GetVolume() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.Volume
+	return s.volume
 }
 
 func (s *PlayerState) SetVolume(v int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Volume = v
+	s.volume = v
 }
 
 func (s *PlayerState) GetMute() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.Mute
+	return s.mute
 }
 
 func (s *PlayerState) SetMute(m bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Mute = m
+	s.mute = m
 }
 
-// 会话管理
 func (s *PlayerState) HasSession(controller string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.SessionOwner == "" || s.SessionOwner == controller
+	return s.sessionOwner == "" || s.sessionOwner == controller
 }
 
-func (s *PlayerState) AcquireOrCheckSession(controller string, allowPreempt bool) bool {
+// AcquireSession returns whether the controller owns the session and whether
+// an existing controller was displaced. The caller must stop the old player
+// when preempted before executing the new action.
+func (s *PlayerState) AcquireSession(controller string, allowPreempt bool) (acquired, preempted bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SessionOwner == "" {
-		s.SessionOwner = controller
-		s.SessionSince = time.Now()
-		return true
+	if s.sessionOwner == "" {
+		now := time.Now()
+		s.sessionOwner = controller
+		s.sessionSince = now
+		s.sessionUsed = now
+		return true, false
 	}
-	if s.SessionOwner == controller {
-		return true
+	if s.sessionOwner == controller {
+		s.sessionUsed = time.Now()
+		return true, false
 	}
-	if allowPreempt {
-		s.SessionOwner = controller
-		s.SessionSince = time.Now()
-		return true
+	if !allowPreempt {
+		return false, false
 	}
-	return false
+	now := time.Now()
+	s.sessionOwner = controller
+	s.sessionSince = now
+	s.sessionUsed = now
+	s.transportState = "STOPPED"
+	return true, true
 }
 
-func (s *PlayerState) ReleaseSession() {
+func (s *PlayerState) ReleaseSession(controller string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.SessionOwner = ""
-	s.SessionSince = time.Time{}
+	if s.sessionOwner != controller {
+		return
+	}
+	s.sessionOwner = ""
+	s.sessionSince = time.Time{}
+	s.sessionUsed = time.Time{}
+}
+
+func (s *PlayerState) GetSessionOwner() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionOwner
 }

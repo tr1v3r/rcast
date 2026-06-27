@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,14 +23,22 @@ import (
 
 const serverName = "RCast-DMR/1.1" // "GoDLNA-DMR/1.1"
 
+var (
+	version   = "dev"
+	buildTime = "unknown"
+	gitCommit = "unknown"
+	goVersion = "unknown"
+)
+
 func main() {
 	defer log.Close()
 
 	cfg := config.Load()
 
 	cmd := &cli.Command{
-		Name:  "rcast",
-		Usage: "RCast DMR",
+		Name:    "rcast",
+		Usage:   "RCast DMR",
+		Version: version,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -58,18 +67,31 @@ func main() {
 }
 
 func runServer(ctx context.Context, cfg config.Config) error {
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// 设备 UUID
-	deviceUUID, err := uuid.LoadOrCreate(cfg.UUIDPath, config.DefaultUUID)
+	deviceUUID, err := uuid.LoadOrCreate(cfg.UUIDPath)
 	if err != nil {
-		log.Info("UUID load error, using default: %v", err)
-		deviceUUID = config.DefaultUUID
+		return fmt.Errorf("load device UUID: %w", err)
 	}
 
 	// 网卡 IP
-	ip, err := netutil.FirstUsableIPv4()
-	if err != nil {
-		log.Error("no IPv4: %v", err)
-		return err
+	ip := cfg.AdvertiseIP
+	if ip != "" {
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.To4() == nil {
+			return fmt.Errorf("DMR_ADVERTISE_IP must be an IPv4 address: %q", ip)
+		}
+		ip = parsed.To4().String()
+	} else {
+		ip, err = netutil.FirstUsableIPv4()
+		if err != nil {
+			log.Error("no IPv4: %v", err)
+			return err
+		}
 	}
 	baseURL := fmt.Sprintf("http://%s:%d", ip, cfg.HTTPPort)
 
@@ -81,33 +103,41 @@ func runServer(ctx context.Context, cfg config.Config) error {
 	mux := httpserver.NewMux()
 	httpserver.RegisterHTTP(mux, baseURL, deviceUUID, st, cfg)
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler: httpserver.LogMiddleware(mux),
+		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
+		Handler:           httpserver.LogMiddleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// SSDP
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	go ssdp.Announce(ctx, baseURL, deviceUUID, serverName)
 	go ssdp.SearchResponder(ctx, baseURL, deviceUUID, serverName)
 
 	// 启动 HTTP
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Info("HTTP listening on %s", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("HTTP error: %v", err)
+			serverErr <- err
 		}
 	}()
 
 	// 优雅退出
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serverErr:
+		runErr = fmt.Errorf("HTTP server: %w", err)
+	}
 	cancel()
 	ctxShutdown, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
-	_ = srv.Shutdown(ctxShutdown)
+	if err := srv.Shutdown(ctxShutdown); err != nil && runErr == nil {
+		runErr = fmt.Errorf("shutting down HTTP server: %w", err)
+	}
 	log.Info("bye")
 
-	return nil
+	return runErr
 }

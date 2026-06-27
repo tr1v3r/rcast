@@ -101,7 +101,7 @@ func (m *Metrics) LogMetrics() {
 	defer m.mu.RUnlock()
 
 	log.Info("Application metrics uptime=%s http_requests_total=%d player_sessions_total=%d player_errors_total=%d upnp_actions_total=%d upnp_errors_total=%d",
-		m.GetUptime().String(),
+		time.Since(m.startTime).String(),
 		m.HTTPRequestsTotal,
 		m.PlayerSessionsTotal,
 		m.PlayerErrorsTotal,
@@ -120,6 +120,7 @@ func (m *Metrics) RenderText() string {
 
 	fmt.Fprintf(&b, "# HELP rcast_uptime_seconds Application uptime in seconds\n# TYPE rcast_uptime_seconds gauge\nrcast_uptime_seconds %.0f\n\n", uptime.Seconds())
 	fmt.Fprintf(&b, "# HELP rcast_http_requests_total Total HTTP requests received\n# TYPE rcast_http_requests_total counter\nrcast_http_requests_total %d\n\n", m.HTTPRequestsTotal)
+	fmt.Fprintf(&b, "# HELP rcast_http_request_duration_seconds_total Cumulative HTTP request duration in seconds\n# TYPE rcast_http_request_duration_seconds_total counter\nrcast_http_request_duration_seconds_total %f\n\n", m.HTTPRequestDuration.Seconds())
 
 	b.WriteString("# HELP rcast_http_requests_by_method HTTP requests broken down by method\n# TYPE rcast_http_requests_by_method counter\n")
 	for method, count := range m.HTTPRequestsByMethod {
