@@ -3,6 +3,7 @@ package upnp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,7 @@ type handlerFakePlayer struct {
 	mu       sync.Mutex
 	plays    int
 	stops    int
+	volumes  []int
 	pauseErr error
 }
 
@@ -27,8 +29,13 @@ func (p *handlerFakePlayer) Play(context.Context, string, int) error {
 	p.plays++
 	return nil
 }
-func (p *handlerFakePlayer) Pause(context.Context) error               { return p.pauseErr }
-func (p *handlerFakePlayer) SetVolume(context.Context, int) error      { return nil }
+func (p *handlerFakePlayer) Pause(context.Context) error { return p.pauseErr }
+func (p *handlerFakePlayer) SetVolume(_ context.Context, volume int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.volumes = append(p.volumes, volume)
+	return nil
+}
 func (p *handlerFakePlayer) SetMute(context.Context, bool) error       { return nil }
 func (p *handlerFakePlayer) SetFullscreen(context.Context, bool) error { return nil }
 func (p *handlerFakePlayer) SetTitle(context.Context, string) error    { return nil }
@@ -75,6 +82,70 @@ func TestRenderingVolumeBeforePlayDoesNotCreatePlayer(t *testing.T) {
 	}
 	if st.GetVolume() != 73 {
 		t.Fatalf("volume=%d, want 73", st.GetVolume())
+	}
+}
+
+func TestAwemeIOSVolumeStepsCoverFullPlayerRange(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &handlerFakePlayer{}
+	st := state.NewWithPlayerFactory(ctx, config.Config{}, func() player.Player { return fake })
+	defer st.Stop()
+	st.EnsurePlayer()
+	handler := RenderingControlHandler(st, config.Config{})
+	const userAgent = "Aweme/390012 CFNetwork/3860.300.31 Darwin/25.2.0"
+
+	// Match the captured sequence: the controller first climbs from the
+	// renderer's reported 50 to 100, then its eight iOS steps descend only to
+	// raw 60. The compatibility mapping must make those eight steps span 100→0.
+	for raw := 55; raw <= 100; raw += 5 {
+		rec := serveActionWithUserAgent(handler, "SetVolume", soapBody(fmt.Sprintf(`<DesiredVolume>%d</DesiredVolume>`, raw)), "10.0.0.1:1", userAgent)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("SetVolume(%d) status=%d body=%s", raw, rec.Code, rec.Body.String())
+		}
+	}
+	for raw := 95; raw >= 60; raw -= 5 {
+		serveActionWithUserAgent(handler, "SetVolume", soapBody(fmt.Sprintf(`<DesiredVolume>%d</DesiredVolume>`, raw)), "10.0.0.1:1", userAgent)
+	}
+	if got := st.GetVolume(); got != 0 {
+		t.Fatalf("player volume after eight down steps=%d, want 0", got)
+	}
+	if got := st.GetReportedVolume("10.0.0.1", awemeIOSVolumeScale); got != 60 {
+		t.Fatalf("Aweme reported volume=%d, want raw 60", got)
+	}
+	awemeVolume := serveActionWithUserAgent(handler, "GetVolume", soapBody(``), "10.0.0.1:1", userAgent)
+	if !strings.Contains(awemeVolume.Body.String(), "<CurrentVolume>60</CurrentVolume>") {
+		t.Fatalf("Aweme GetVolume body=%s", awemeVolume.Body.String())
+	}
+	standardVolume := serveActionWithUserAgent(handler, "GetVolume", soapBody(``), "10.0.0.1:1", "StandardDLNA/1.0")
+	if !strings.Contains(standardVolume.Body.String(), "<CurrentVolume>0</CurrentVolume>") {
+		t.Fatalf("standard GetVolume body=%s", standardVolume.Body.String())
+	}
+
+	for raw := 65; raw <= 100; raw += 5 {
+		serveActionWithUserAgent(handler, "SetVolume", soapBody(fmt.Sprintf(`<DesiredVolume>%d</DesiredVolume>`, raw)), "10.0.0.1:1", userAgent)
+	}
+	if got := st.GetVolume(); got != 100 {
+		t.Fatalf("player volume after eight up steps=%d, want 100", got)
+	}
+	if got := fake.volumes[len(fake.volumes)-1]; got != 100 {
+		t.Fatalf("last player volume=%d, want 100", got)
+	}
+}
+
+func TestVolumeScaleOnlyMatchesAwemeIOS(t *testing.T) {
+	tests := []struct {
+		userAgent string
+		want      float64
+	}{
+		{"Aweme/390012 CFNetwork/3860.300.31 Darwin/25.2.0", 2.5},
+		{"Aweme/390012 okhttp/4.0 Android/16", 1},
+		{"Other/1 CFNetwork/3860.300.31 Darwin/25.2.0", 1},
+	}
+	for _, tt := range tests {
+		if got := volumeScaleForUserAgent(tt.userAgent); got != tt.want {
+			t.Errorf("volumeScaleForUserAgent(%q)=%v, want %v", tt.userAgent, got, tt.want)
+		}
 	}
 }
 
@@ -180,8 +251,13 @@ func soapBody(inner string) string {
 }
 
 func serveAction(handler http.Handler, action, body, remote string) *httptest.ResponseRecorder {
+	return serveActionWithUserAgent(handler, action, body, remote, "")
+}
+
+func serveActionWithUserAgent(handler http.Handler, action, body, remote, userAgent string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/control", strings.NewReader(body))
 	req.Header.Set("SOAPACTION", `"service#`+action+`"`)
+	req.Header.Set("User-Agent", userAgent)
 	req.RemoteAddr = remote
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
