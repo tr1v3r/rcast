@@ -21,6 +21,7 @@ type handlerFakePlayer struct {
 	stops         int
 	playbackStops int
 	volumes       []int
+	titles        []string
 	pauseErr      error
 }
 
@@ -45,10 +46,15 @@ func (p *handlerFakePlayer) SetVolume(_ context.Context, volume int) error {
 }
 func (p *handlerFakePlayer) SetMute(context.Context, bool) error       { return nil }
 func (p *handlerFakePlayer) SetFullscreen(context.Context, bool) error { return nil }
-func (p *handlerFakePlayer) SetTitle(context.Context, string) error    { return nil }
-func (p *handlerFakePlayer) Screenshot(context.Context, string) error  { return nil }
-func (p *handlerFakePlayer) SetSpeed(context.Context, float64) error   { return nil }
-func (p *handlerFakePlayer) Seek(context.Context, float64) error       { return nil }
+func (p *handlerFakePlayer) SetTitle(_ context.Context, title string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.titles = append(p.titles, title)
+	return nil
+}
+func (p *handlerFakePlayer) Screenshot(context.Context, string) error { return nil }
+func (p *handlerFakePlayer) SetSpeed(context.Context, float64) error  { return nil }
+func (p *handlerFakePlayer) Seek(context.Context, float64) error      { return nil }
 func (p *handlerFakePlayer) GetPosition(context.Context) (float64, error) {
 	return 0, nil
 }
@@ -221,6 +227,32 @@ func TestAVTransportURIChangeReusesActivePlayer(t *testing.T) {
 	}
 	if players[0].plays != 2 {
 		t.Fatalf("play calls=%d, want 2", players[0].plays)
+	}
+}
+
+func TestAVTransportPlayAppliesMetadataTitle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &handlerFakePlayer{}
+	st := state.NewWithPlayerFactory(ctx, config.Config{}, func() player.Player { return fake })
+	defer st.Stop()
+	handler := AVTransportHandler(st, config.Config{})
+	const remote = "10.0.0.1:1"
+	const title = "周星驰新电影"
+	body := `<CurrentURI>https://example.test/video.mp4</CurrentURI>` +
+		`<CurrentURIMetaData>&lt;DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"&gt;` +
+		`&lt;item&gt;&lt;dc:title&gt;` + title + `&lt;/dc:title&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</CurrentURIMetaData>`
+
+	set := serveAction(handler, "SetAVTransportURI", soapBody(body), remote)
+	if set.Code != http.StatusOK {
+		t.Fatalf("SetURI status=%d body=%s", set.Code, set.Body.String())
+	}
+	play := serveAction(handler, "Play", soapBody(`<Speed>1</Speed>`), remote)
+	if play.Code != http.StatusOK {
+		t.Fatalf("Play status=%d body=%s", play.Code, play.Body.String())
+	}
+	if len(fake.titles) != 1 || fake.titles[0] != title {
+		t.Fatalf("player titles=%q, want [%q]", fake.titles, title)
 	}
 }
 

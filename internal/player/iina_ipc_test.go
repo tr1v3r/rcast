@@ -104,6 +104,14 @@ func (s *fakeMPVServer) handle(conn *net.UnixConn) {
 						s.mu.Unlock()
 					}
 				}
+			case "set_property":
+				if len(req.Command) >= 3 {
+					if name, ok := req.Command[1].(string); ok {
+						s.mu.Lock()
+						s.props[name] = req.Command[2]
+						s.mu.Unlock()
+					}
+				}
 			case "stop":
 				s.mu.Lock()
 				delete(s.props, "path")
@@ -174,6 +182,27 @@ func TestIINAPlayer_StopPlaybackKeepsIPCReusable(t *testing.T) {
 	}
 	if err := p.SetVolume(ctx, 40); err != nil {
 		t.Fatalf("IPC unusable after StopPlayback: %v", err)
+	}
+}
+
+func TestIINAPlayer_SetTitleUsesForceMediaTitle(t *testing.T) {
+	s := newFakeMPVServer(t)
+	defer s.close()
+	p := playerOnSocket(t, s)
+	const title = "A useful video title"
+
+	if err := p.SetTitle(context.Background(), title); err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
+	s.mu.Lock()
+	got := s.props["force-media-title"]
+	legacy := s.props["title"]
+	s.mu.Unlock()
+	if got != title {
+		t.Fatalf("force-media-title=%v, want %q", got, title)
+	}
+	if legacy != nil {
+		t.Fatalf("legacy title property unexpectedly set to %v", legacy)
 	}
 }
 

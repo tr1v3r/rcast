@@ -128,7 +128,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
-				uri, _ := st.GetURI()
+				uri, meta := st.GetURI()
 				if uri == "" {
 					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 714, "No content selected")
@@ -142,6 +142,11 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 					st.SetTransportState("STOPPED")
 					WriteSOAPError(w, 501, "Action Failed")
 					return
+				}
+				if title := XMLText([]byte(meta), "title"); title != "" {
+					if err := p.SetTitle(ctx, title); err != nil {
+						log.CtxWarn(ctx, "set media title: %v", err)
+					}
 				}
 				if st.GetMute() {
 					if err := p.SetMute(ctx, true); err != nil {
