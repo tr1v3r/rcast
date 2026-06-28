@@ -25,7 +25,7 @@ func Announce(ctx context.Context, baseURL, deviceUUID, serverName string) {
 		log.CtxError(ctx, "SSDP announce socket: %v", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	usns := []struct{ st, usn string }{
 		{upnp.DeviceType, deviceUUID + "::" + upnp.DeviceType},
@@ -89,7 +89,7 @@ func SearchResponder(ctx context.Context, baseURL, deviceUUID, serverName string
 		log.CtxError(ctx, "listen SSDP multicast: %v", err)
 		return
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	if err := l.SetReadBuffer(65536); err != nil {
 		log.CtxWarn(ctx, "set SSDP read buffer: %v", err)
 	}
@@ -97,7 +97,10 @@ func SearchResponder(ctx context.Context, baseURL, deviceUUID, serverName string
 	responders := make(chan struct{}, 32)
 
 	for {
-		l.SetDeadline(time.Now().Add(2 * time.Second))
+		if err := l.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			log.CtxError(ctx, "set SSDP read deadline: %v", err)
+			return
+		}
 		n, src, err := l.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {

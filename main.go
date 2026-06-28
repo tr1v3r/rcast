@@ -38,7 +38,7 @@ func main() {
 	cmd := &cli.Command{
 		Name:    "rcast",
 		Usage:   "RCast DMR",
-		Version: version,
+		Version: fmt.Sprintf("%s (commit %s, built %s, %s)", version, gitCommit, buildTime, goVersion),
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "debug",

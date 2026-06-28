@@ -20,6 +20,7 @@ import (
 // https://mpv.io/manual/stable/#properties
 
 const sockPathPrefix = "/tmp/rcast_iina-ipc-sock_"
+
 const iinaAppBinary = "/Applications/IINA.app/Contents/MacOS/iina"
 
 // ipcTimeout caps how long a single IPC write/read may block. Without it, a

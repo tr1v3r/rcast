@@ -32,7 +32,7 @@ func LoadOrCreate(path string) (string, error) {
 		return "", fmt.Errorf("creating temporary UUID file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if err := tmp.Chmod(0o644); err != nil {
 		_ = tmp.Close()

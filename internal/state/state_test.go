@@ -15,18 +15,30 @@ type fakePlayer struct {
 	stopContextErr error
 }
 
-func (p *fakePlayer) Play(context.Context, string, int) error      { return nil }
-func (p *fakePlayer) Pause(context.Context) error                  { return nil }
-func (p *fakePlayer) StopPlayback(context.Context) error           { return nil }
-func (p *fakePlayer) SetVolume(context.Context, int) error         { return nil }
-func (p *fakePlayer) SetMute(context.Context, bool) error          { return nil }
-func (p *fakePlayer) SetFullscreen(context.Context, bool) error    { return nil }
-func (p *fakePlayer) SetTitle(context.Context, string) error       { return nil }
-func (p *fakePlayer) Screenshot(context.Context, string) error     { return nil }
-func (p *fakePlayer) SetSpeed(context.Context, float64) error      { return nil }
-func (p *fakePlayer) Seek(context.Context, float64) error          { return nil }
+func (p *fakePlayer) Play(context.Context, string, int) error { return nil }
+
+func (p *fakePlayer) Pause(context.Context) error { return nil }
+
+func (p *fakePlayer) StopPlayback(context.Context) error { return nil }
+
+func (p *fakePlayer) SetVolume(context.Context, int) error { return nil }
+
+func (p *fakePlayer) SetMute(context.Context, bool) error { return nil }
+
+func (p *fakePlayer) SetFullscreen(context.Context, bool) error { return nil }
+
+func (p *fakePlayer) SetTitle(context.Context, string) error { return nil }
+
+func (p *fakePlayer) Screenshot(context.Context, string) error { return nil }
+
+func (p *fakePlayer) SetSpeed(context.Context, float64) error { return nil }
+
+func (p *fakePlayer) Seek(context.Context, float64) error { return nil }
+
 func (p *fakePlayer) GetPosition(context.Context) (float64, error) { return 0, nil }
+
 func (p *fakePlayer) GetDuration(context.Context) (float64, error) { return 0, nil }
+
 func (p *fakePlayer) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

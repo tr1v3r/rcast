@@ -55,7 +55,7 @@ func (s *fakeMPVServer) serve() {
 }
 
 func (s *fakeMPVServer) handle(conn *net.UnixConn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
 	for {
 		line, err := reader.ReadBytes('\n')

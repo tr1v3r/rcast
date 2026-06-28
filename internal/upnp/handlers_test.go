@@ -31,36 +31,48 @@ func (p *handlerFakePlayer) Play(context.Context, string, int) error {
 	p.plays++
 	return nil
 }
+
 func (p *handlerFakePlayer) Pause(context.Context) error { return p.pauseErr }
+
 func (p *handlerFakePlayer) StopPlayback(context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.playbackStops++
 	return nil
 }
+
 func (p *handlerFakePlayer) SetVolume(_ context.Context, volume int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.volumes = append(p.volumes, volume)
 	return nil
 }
-func (p *handlerFakePlayer) SetMute(context.Context, bool) error       { return nil }
+
+func (p *handlerFakePlayer) SetMute(context.Context, bool) error { return nil }
+
 func (p *handlerFakePlayer) SetFullscreen(context.Context, bool) error { return nil }
+
 func (p *handlerFakePlayer) SetTitle(_ context.Context, title string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.titles = append(p.titles, title)
 	return nil
 }
+
 func (p *handlerFakePlayer) Screenshot(context.Context, string) error { return nil }
-func (p *handlerFakePlayer) SetSpeed(context.Context, float64) error  { return nil }
-func (p *handlerFakePlayer) Seek(context.Context, float64) error      { return nil }
+
+func (p *handlerFakePlayer) SetSpeed(context.Context, float64) error { return nil }
+
+func (p *handlerFakePlayer) Seek(context.Context, float64) error { return nil }
+
 func (p *handlerFakePlayer) GetPosition(context.Context) (float64, error) {
 	return 0, nil
 }
+
 func (p *handlerFakePlayer) GetDuration(context.Context) (float64, error) {
 	return 0, nil
 }
+
 func (p *handlerFakePlayer) Stop(context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
