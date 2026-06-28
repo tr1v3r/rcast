@@ -3,11 +3,11 @@ package upnp
 import (
 	"bytes"
 	"encoding/xml"
-	"fmt"
 	"html"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -46,7 +46,7 @@ func WriteSOAPResponse(w http.ResponseWriter, namespace, respName, inner string)
   </s:Body>
 </s:Envelope>`)
 
-	w.Write([]byte(builder.String()))
+	_, _ = w.Write([]byte(builder.String()))
 }
 
 func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
@@ -65,7 +65,7 @@ func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
       <detail>
         <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
           <errorCode>`)
-	builder.WriteString(fmt.Sprintf("%d", code))
+	builder.WriteString(strconv.Itoa(code))
 	builder.WriteString(`</errorCode>
           <errorDescription>`)
 	builder.WriteString(html.EscapeString(desc))
@@ -76,7 +76,7 @@ func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
   </s:Body>
 </s:Envelope>`)
 
-	w.Write([]byte(builder.String()))
+	_, _ = w.Write([]byte(builder.String()))
 }
 
 func XMLText(b []byte, tag string) string {

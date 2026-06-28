@@ -13,7 +13,7 @@ func FirstUsableIPv4() (string, error) {
 		IP:   net.ParseIP("239.255.255.250"),
 		Port: 1900,
 	}); err == nil {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && usableIPv4(addr.IP) {
 			return addr.IP.To4().String(), nil
 		}

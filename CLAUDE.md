@@ -42,11 +42,14 @@ go test -v ./...
 
 ### Code Quality (via Makefile)
 ```bash
-make test-coverage   # race + HTML coverage report
+make test-coverage   # HTML coverage report
+make race-test       # tests with the race detector
 make lint            # golangci-lint run
 make vet             # go vet ./...
 make fmt             # goimports-reviser -format ./...
-make dev             # full workflow: tidy fmt vet lint test build
+make fmt-check       # verify formatting without modifying files
+make dev             # full workflow: tidy fmt vet lint race-test build
+make ci              # non-mutating CI checks + coverage + release build
 ```
 
 ## Architecture
