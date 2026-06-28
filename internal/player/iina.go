@@ -341,7 +341,7 @@ func (p *IINAPlayer) SetFullscreen(ctx context.Context, f bool) error {
 }
 
 func (p *IINAPlayer) SetTitle(ctx context.Context, title string) error {
-	return p.sendOK(ctx, []any{"set_property", "title", title}, "set title")
+	return p.sendOK(ctx, []any{"set_property", "force-media-title", title}, "set title")
 }
 
 func (p *IINAPlayer) Screenshot(ctx context.Context, _ string) error {
