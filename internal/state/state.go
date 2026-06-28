@@ -94,23 +94,35 @@ func (s *PlayerState) GetActivePlayer() player.Player {
 }
 
 func (s *PlayerState) StopPlayer() error {
-	s.mu.Lock()
-	p := s.player
-	s.player = nil
-	s.playerLastUsed = time.Time{}
-	s.mu.Unlock()
+	p := s.takePlayer()
 	if p == nil {
 		return nil
 	}
 	return p.Stop(s.ctx)
 }
 
+func (s *PlayerState) takePlayer() player.Player {
+	s.mu.Lock()
+	p := s.player
+	s.player = nil
+	s.playerLastUsed = time.Time{}
+	s.mu.Unlock()
+	return p
+}
+
 func (s *PlayerState) Stop() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 
-	if err := s.StopPlayer(); err != nil {
-		log.CtxInfo(s.ctx, "player stop error: %v", err)
+	if p := s.takePlayer(); p != nil {
+		// The application context is already cancelled during shutdown. Give
+		// the player a fresh window to deliver mpv's quit command so IINA does
+		// not survive with an orphaned, unlinked IPC socket.
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := p.Stop(stopCtx); err != nil {
+			log.CtxInfo(s.ctx, "player stop error: %v", err)
+		}
+		cancel()
 	}
 	s.mu.Lock()
 	s.sessionOwner = ""

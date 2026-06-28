@@ -10,12 +10,14 @@ import (
 )
 
 type fakePlayer struct {
-	mu      sync.Mutex
-	stopped int
+	mu             sync.Mutex
+	stopped        int
+	stopContextErr error
 }
 
 func (p *fakePlayer) Play(context.Context, string, int) error      { return nil }
 func (p *fakePlayer) Pause(context.Context) error                  { return nil }
+func (p *fakePlayer) StopPlayback(context.Context) error           { return nil }
 func (p *fakePlayer) SetVolume(context.Context, int) error         { return nil }
 func (p *fakePlayer) SetMute(context.Context, bool) error          { return nil }
 func (p *fakePlayer) SetFullscreen(context.Context, bool) error    { return nil }
@@ -25,10 +27,11 @@ func (p *fakePlayer) SetSpeed(context.Context, float64) error      { return nil 
 func (p *fakePlayer) Seek(context.Context, float64) error          { return nil }
 func (p *fakePlayer) GetPosition(context.Context) (float64, error) { return 0, nil }
 func (p *fakePlayer) GetDuration(context.Context) (float64, error) { return 0, nil }
-func (p *fakePlayer) Stop(context.Context) error {
+func (p *fakePlayer) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stopped++
+	p.stopContextErr = ctx.Err()
 	return nil
 }
 
@@ -75,5 +78,22 @@ func TestSessionPreemptionAndPlayerLifecycle(t *testing.T) {
 	st.ReleaseSession("controller-b")
 	if st.GetSessionOwner() != "" {
 		t.Fatal("owner failed to release the session")
+	}
+}
+
+func TestStopUsesLiveCleanupContextAfterAppCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &fakePlayer{}
+	st := NewWithPlayerFactory(ctx, config.Config{}, func() player.Player { return fake })
+	st.EnsurePlayer()
+
+	cancel()
+	st.Stop()
+
+	if fake.stopped != 1 {
+		t.Fatalf("player stopped %d times, want 1", fake.stopped)
+	}
+	if fake.stopContextErr != nil {
+		t.Fatalf("shutdown player context was already cancelled: %v", fake.stopContextErr)
 	}
 }

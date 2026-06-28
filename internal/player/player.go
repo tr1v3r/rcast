@@ -5,6 +5,7 @@ import "context"
 type Player interface {
 	Play(ctx context.Context, uri string, volume int) error
 	Pause(ctx context.Context) error
+	StopPlayback(ctx context.Context) error
 	Stop(ctx context.Context) error
 	SetVolume(ctx context.Context, v int) error
 	SetMute(ctx context.Context, m bool) error

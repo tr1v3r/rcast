@@ -109,10 +109,15 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
-				if err := st.StopPlayer(); err != nil {
-					monitoring.GetMetrics().RecordPlayerError()
-					WriteSOAPError(w, 501, "Action Failed")
-					return
+				if p := st.GetActivePlayer(); p != nil {
+					if err := p.StopPlayback(ctx); err != nil {
+						log.CtxWarn(ctx, "stop current playback before URI change: %v", err)
+						if err := st.StopPlayer(); err != nil {
+							monitoring.GetMetrics().RecordPlayerError()
+							WriteSOAPError(w, 501, "Action Failed")
+							return
+						}
+					}
 				}
 				st.SetURI(uri, meta)
 				WriteSOAPResponse(w, AVTransportType, "SetAVTransportURIResponse", "")
