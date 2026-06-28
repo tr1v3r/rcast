@@ -16,11 +16,12 @@ import (
 )
 
 type handlerFakePlayer struct {
-	mu       sync.Mutex
-	plays    int
-	stops    int
-	volumes  []int
-	pauseErr error
+	mu            sync.Mutex
+	plays         int
+	stops         int
+	playbackStops int
+	volumes       []int
+	pauseErr      error
 }
 
 func (p *handlerFakePlayer) Play(context.Context, string, int) error {
@@ -30,6 +31,12 @@ func (p *handlerFakePlayer) Play(context.Context, string, int) error {
 	return nil
 }
 func (p *handlerFakePlayer) Pause(context.Context) error { return p.pauseErr }
+func (p *handlerFakePlayer) StopPlayback(context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.playbackStops++
+	return nil
+}
 func (p *handlerFakePlayer) SetVolume(_ context.Context, volume int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -179,6 +186,41 @@ func TestAVTransportPreemptionStopsOldPlayer(t *testing.T) {
 	}
 	if st.GetSessionOwner() != "10.0.0.2" {
 		t.Fatalf("owner=%q", st.GetSessionOwner())
+	}
+}
+
+func TestAVTransportURIChangeReusesActivePlayer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var players []*handlerFakePlayer
+	st := state.NewWithPlayerFactory(ctx, config.Config{}, func() player.Player {
+		p := &handlerFakePlayer{}
+		players = append(players, p)
+		return p
+	})
+	defer st.Stop()
+	handler := AVTransportHandler(st, config.Config{})
+	const remote = "10.0.0.1:1"
+
+	serveAction(handler, "SetAVTransportURI", soapBody(`<CurrentURI>https://example.test/one.mp4</CurrentURI>`), remote)
+	serveAction(handler, "Play", soapBody(`<Speed>1</Speed>`), remote)
+	setSecond := serveAction(handler, "SetAVTransportURI", soapBody(`<CurrentURI>https://example.test/two.mp4</CurrentURI>`), remote)
+	if setSecond.Code != http.StatusOK {
+		t.Fatalf("second SetURI status=%d body=%s", setSecond.Code, setSecond.Body.String())
+	}
+	serveAction(handler, "Play", soapBody(`<Speed>1</Speed>`), remote)
+
+	if len(players) != 1 {
+		t.Fatalf("created %d players, want one reused player", len(players))
+	}
+	if players[0].playbackStops != 1 {
+		t.Fatalf("playback stops=%d, want 1", players[0].playbackStops)
+	}
+	if players[0].stops != 0 {
+		t.Fatalf("player process stops=%d, want 0", players[0].stops)
+	}
+	if players[0].plays != 2 {
+		t.Fatalf("play calls=%d, want 2", players[0].plays)
 	}
 }
 

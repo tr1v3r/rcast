@@ -81,13 +81,33 @@ func (s *fakeMPVServer) handle(conn *net.UnixConn) {
 		}
 
 		resp := MPVJSONIPCResponse{RequestID: req.RequestID, Error: "success"}
-		if len(req.Command) >= 2 {
-			if req.Command[0] == "get_property" {
-				if name, ok := req.Command[1].(string); ok {
-					s.mu.Lock()
-					resp.Data = s.props[name]
-					s.mu.Unlock()
+		if len(req.Command) > 0 {
+			switch req.Command[0] {
+			case "get_property":
+				if len(req.Command) >= 2 {
+					if name, ok := req.Command[1].(string); ok {
+						s.mu.Lock()
+						value, exists := s.props[name]
+						s.mu.Unlock()
+						if exists {
+							resp.Data = value
+						} else {
+							resp.Error = "property unavailable"
+						}
+					}
 				}
+			case "loadfile":
+				if len(req.Command) >= 2 {
+					if uri, ok := req.Command[1].(string); ok {
+						s.mu.Lock()
+						s.props["path"] = uri
+						s.mu.Unlock()
+					}
+				}
+			case "stop":
+				s.mu.Lock()
+				delete(s.props, "path")
+				s.mu.Unlock()
 			}
 		}
 		out, _ := json.Marshal(resp)
@@ -140,6 +160,43 @@ func TestIINAPlayer_CommandAndGetProperty(t *testing.T) {
 	}
 	if pos != 12.5 {
 		t.Fatalf("GetPosition = %v, want 12.5", pos)
+	}
+}
+
+func TestIINAPlayer_StopPlaybackKeepsIPCReusable(t *testing.T) {
+	s := newFakeMPVServer(t)
+	defer s.close()
+	p := playerOnSocket(t, s)
+	ctx := context.Background()
+
+	if err := p.StopPlayback(ctx); err != nil {
+		t.Fatalf("StopPlayback: %v", err)
+	}
+	if err := p.SetVolume(ctx, 40); err != nil {
+		t.Fatalf("IPC unusable after StopPlayback: %v", err)
+	}
+}
+
+func TestIINAPlayer_PlayLoadsNewURIAfterStopPlayback(t *testing.T) {
+	s := newFakeMPVServer(t)
+	defer s.close()
+	s.setProp("path", "https://example.test/old.mp4")
+	p := playerOnSocket(t, s)
+	p.activate = func(context.Context) error { return nil }
+	ctx := context.Background()
+
+	if err := p.StopPlayback(ctx); err != nil {
+		t.Fatalf("StopPlayback: %v", err)
+	}
+	const nextURI = "https://example.test/new.mp4"
+	if err := p.Play(ctx, nextURI, 50); err != nil {
+		t.Fatalf("Play new URI: %v", err)
+	}
+	s.mu.Lock()
+	got := s.props["path"]
+	s.mu.Unlock()
+	if got != nextURI {
+		t.Fatalf("loaded path=%v, want %s", got, nextURI)
 	}
 }
 
@@ -233,5 +290,24 @@ func TestIINAPlayer_StopIdempotent(t *testing.T) {
 	// Stop on a fresh player (no conn, no process) must not panic or deadlock.
 	if err := p.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop on fresh player: %v", err)
+	}
+}
+
+func TestIINALaunchCommandForAppForcesNewInstance(t *testing.T) {
+	cmd := iinaLaunchCommand(context.Background(), iinaAppBinary, []string{"--keep-running", "video.mp4"})
+	want := []string{"/usr/bin/open", "-n", "-a", "IINA", "--args", "--keep-running", "video.mp4"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("args=%q, want %q", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Fatalf("arg[%d]=%q, want %q", i, cmd.Args[i], want[i])
+		}
+	}
+
+	const cli = "/opt/homebrew/bin/iina-cli"
+	cliCmd := iinaLaunchCommand(context.Background(), cli, []string{"video.mp4"})
+	if cliCmd.Path != cli || len(cliCmd.Args) != 2 || cliCmd.Args[1] != "video.mp4" {
+		t.Fatalf("CLI command=%q path=%q", cliCmd.Args, cliCmd.Path)
 	}
 }

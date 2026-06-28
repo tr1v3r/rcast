@@ -20,6 +20,7 @@ import (
 // https://mpv.io/manual/stable/#properties
 
 const sockPathPrefix = "/tmp/rcast_iina-ipc-sock_"
+const iinaAppBinary = "/Applications/IINA.app/Contents/MacOS/iina"
 
 // ipcTimeout caps how long a single IPC write/read may block. Without it, a
 // hung IINA would hold the player lock forever and stall every later command.
@@ -95,6 +96,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	if hasEndpoint {
 		// iina-cli may exit after handing the request to IINA, so IPC—not the
 		// launcher process—is the source of truth for a reusable player.
+		loadIntoExisting := false
 		if val, err := p.getProperty(ctx, "path"); err == nil {
 			if currentPath, ok := val.(string); ok && currentPath == uri {
 				_ = p.SetVolume(ctx, volume)
@@ -106,8 +108,15 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			} else {
 				log.CtxDebug(ctx, "path mismatch or invalid type: current=%v target=%s", val, uri)
 			}
+			loadIntoExisting = true
+		} else {
+			log.CtxDebug(ctx, "get path property failed: %v", err)
+			// mpv reports path as unavailable after a "stop" command even
+			// though the IPC connection remains healthy.
+			loadIntoExisting = p.hasLiveConnection()
+		}
 
-			// Load the new file into the running instance.
+		if loadIntoExisting {
 			if err := p.sendOK(ctx, []any{"loadfile", uri, "replace"}, "loadfile"); err == nil {
 				_ = p.SetVolume(ctx, volume)
 				p.bringToFront(ctx)
@@ -115,8 +124,6 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			} else {
 				log.CtxWarn(ctx, "reuse IINA ipc loadfile failed: %v", err)
 			}
-		} else {
-			log.CtxDebug(ctx, "get path property failed: %v", err)
 		}
 
 		log.CtxWarn(ctx, "failed to reuse IINA instance, restarting")
@@ -129,6 +136,35 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 		return fmt.Errorf("IINA not found: %w", err)
 	}
 
+	var launchErr error
+	for attempt := range 2 {
+		if launchErr = p.launch(ctx, exe, uri, volume); launchErr == nil {
+			// `open -n` activates the newly created app instance itself. Calling
+			// `open -a IINA` here could focus an orphaned older instance.
+			if exe != iinaAppBinary {
+				p.bringToFront(ctx)
+			}
+			return nil
+		}
+		log.CtxWarn(ctx, "IINA launch attempt %d failed: %v", attempt+1, launchErr)
+		_ = p.Stop(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attempt == 0 {
+			timer := time.NewTimer(150 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return fmt.Errorf("failed to start IINA after retry: %w", launchErr)
+}
+
+func (p *IINAPlayer) launch(ctx context.Context, exe, uri string, volume int) error {
 	p.mu.Lock()
 	p.sockPath = sockPathPrefix + uuid.NewString()
 	sockPath := p.sockPath
@@ -145,9 +181,9 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	}
 	args = append(args, uri)
 
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := iinaLaunchCommand(ctx, exe, args)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start IINA: %w", err)
+		return fmt.Errorf("starting IINA process: %w", err)
 	}
 
 	p.mu.Lock()
@@ -156,15 +192,25 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	p.mu.Unlock()
 	go p.wait(cmd)
 	if err := p.waitForIPC(ctx, sockPath); err != nil {
-		_ = p.Stop(ctx)
 		return fmt.Errorf("waiting for IINA IPC: %w", err)
 	}
-	p.bringToFront(ctx)
 	return nil
 }
 
+func iinaLaunchCommand(ctx context.Context, exe string, args []string) *exec.Cmd {
+	if exe == iinaAppBinary {
+		openArgs := []string{"-n", "-a", "IINA", "--args"}
+		openArgs = append(openArgs, args...)
+		// -n forces a separate application instance. Without it, LaunchServices
+		// may forward the request to an IINA left over from a previous Rcast run,
+		// and that instance will not create our new mpv IPC socket.
+		return exec.CommandContext(ctx, "/usr/bin/open", openArgs...)
+	}
+	return exec.CommandContext(ctx, exe, args...)
+}
+
 func activateIINA(ctx context.Context) error {
-	return exec.CommandContext(ctx, "open", "-a", "IINA").Run()
+	return exec.CommandContext(ctx, "/usr/bin/open", "-a", "IINA").Run()
 }
 
 func (p *IINAPlayer) bringToFront(ctx context.Context) {
@@ -235,8 +281,18 @@ func (p *IINAPlayer) connect(sockPath string) (net.Conn, error) {
 	return conn, nil
 }
 
+func (p *IINAPlayer) hasLiveConnection() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn != nil
+}
+
 func (p *IINAPlayer) Pause(ctx context.Context) error {
 	return p.sendOK(ctx, []any{"set_property", "pause", true}, "pause")
+}
+
+func (p *IINAPlayer) StopPlayback(ctx context.Context) error {
+	return p.sendOK(ctx, []any{"stop"}, "stop playback")
 }
 
 func (p *IINAPlayer) Resume(ctx context.Context) error {
@@ -440,11 +496,10 @@ func findIINA() (string, error) {
 			return c, nil
 		}
 	}
-	const internalBin = "/Applications/IINA.app/Contents/MacOS/iina"
-	if fileExists(internalBin) {
-		return internalBin, nil
+	if fileExists(iinaAppBinary) {
+		return iinaAppBinary, nil
 	}
-	return "", fmt.Errorf("IINA not installed (looked for iina-cli and %s)", internalBin)
+	return "", fmt.Errorf("IINA not installed (looked for iina-cli and %s)", iinaAppBinary)
 }
 
 func fileExists(p string) bool {
