@@ -18,6 +18,13 @@ import (
 // the player's full 0-100 range.
 const awemeIOSVolumeScale = 2.5
 
+// systemVolumeSink/systemMuteSink are injectable so tests can exercise the
+// LinkSystemOutputVolume branches without changing the host's real volume.
+var (
+	systemVolumeSink = player.SetSystemOutputVolume
+	systemMuteSink   = player.SetSystemMute
+)
+
 func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := st.Context()
@@ -59,7 +66,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 					}
 				}
 				if cfg.LinkSystemOutputVolume {
-					if err := player.SetSystemOutputVolume(appliedVolume); err != nil {
+					if err := systemVolumeSink(appliedVolume); err != nil {
 						log.CtxWarn(ctx, "set system volume: %v", err)
 					}
 				}
@@ -92,7 +99,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 					}
 				}
 				if cfg.LinkSystemOutputVolume {
-					if err := player.SetSystemMute(m); err != nil {
+					if err := systemMuteSink(m); err != nil {
 						log.CtxWarn(ctx, "set system mute: %v", err)
 					}
 				}

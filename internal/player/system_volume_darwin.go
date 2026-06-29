@@ -7,14 +7,20 @@ import (
 	"os/exec"
 )
 
-func SetSystemOutputVolume(v int) error {
-	script := fmt.Sprintf(`set volume output volume %d`, v)
+// runOSA executes an AppleScript snippet via osascript. It is a package-level
+// variable so tests can inject a recorder that captures the script and controls
+// the returned error without invoking the real osascript binary.
+var runOSA = func(script string) error {
 	return exec.Command("osascript", "-e", script).Run()
+}
+
+func SetSystemOutputVolume(v int) error {
+	return runOSA(fmt.Sprintf(`set volume output volume %d`, v))
 }
 
 func SetSystemMute(m bool) error {
 	if m {
-		return exec.Command("osascript", "-e", `set volume with output muted`).Run()
+		return runOSA(`set volume with output muted`)
 	}
-	return exec.Command("osascript", "-e", `set volume without output muted`).Run()
+	return runOSA(`set volume without output muted`)
 }

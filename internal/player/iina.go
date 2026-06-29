@@ -28,24 +28,63 @@ const iinaAppBinary = "/Applications/IINA.app/Contents/MacOS/iina"
 // It is a var (not a const) so tests can shrink it.
 var ipcTimeout = 3 * time.Second
 
+// command is the small surface of an OS process that IINAPlayer uses, so
+// launch/Stop can be exercised without spawning a real IINA.
+type command interface {
+	Start() error
+	Wait() error
+	Kill() error
+}
+
+// osCommand adapts exec.Cmd to command. Kill mirrors the prior Stop logic:
+// tolerate a nil process and treat an already-exited process as success.
+type osCommand struct{ cmd *exec.Cmd }
+
+func (c *osCommand) Start() error { return c.cmd.Start() }
+
+func (c *osCommand) Wait() error { return c.cmd.Wait() }
+
+func (c *osCommand) Kill() error {
+	if c.cmd.Process == nil {
+		return nil
+	}
+	if err := c.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
+}
+
 func NewIINAPlayer(fullscreen bool) *IINAPlayer {
 	return &IINAPlayer{
 		fullscreen: fullscreen,
 		activate:   activateIINA,
+		find:       findIINA,
+		commandFactory: func(ctx context.Context, exe string, args []string) command {
+			return &osCommand{iinaLaunchCommand(ctx, exe, args)}
+		},
+		dial:       net.Dial,
+		retryDelay: 150 * time.Millisecond,
+		ipcPoll:    25 * time.Millisecond,
 	}
 }
 
 type IINAPlayer struct {
-	mu       sync.Mutex
-	conn     net.Conn
-	reader   *bufio.Reader
-	sockPath string
-
+	mu             sync.Mutex
+	conn           net.Conn
+	reader         *bufio.Reader
+	sockPath       string
 	requestIDCount int
 
-	command    *exec.Cmd
+	command    command // was *exec.Cmd
 	fullscreen bool
-	activate   func(context.Context) error
+
+	// runtime hooks (unexported; production defaults above)
+	find           func() (string, error)
+	commandFactory func(ctx context.Context, exe string, args []string) command
+	dial           func(network, addr string) (net.Conn, error)
+	activate       func(context.Context) error
+	retryDelay     time.Duration
+	ipcPoll        time.Duration
 }
 
 func (p *IINAPlayer) Close(_ context.Context) error {
@@ -132,7 +171,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 	}
 
 	// Launch a fresh, IPC-controllable IINA instance.
-	exe, err := findIINA()
+	exe, err := p.find()
 	if err != nil {
 		return fmt.Errorf("IINA not found: %w", err)
 	}
@@ -153,7 +192,7 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 			return err
 		}
 		if attempt == 0 {
-			timer := time.NewTimer(150 * time.Millisecond)
+			timer := time.NewTimer(p.retryDelay)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -182,7 +221,7 @@ func (p *IINAPlayer) launch(ctx context.Context, exe, uri string, volume int) er
 	}
 	args = append(args, uri)
 
-	cmd := iinaLaunchCommand(ctx, exe, args)
+	cmd := p.commandFactory(ctx, exe, args)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting IINA process: %w", err)
 	}
@@ -227,7 +266,7 @@ func (p *IINAPlayer) bringToFront(ctx context.Context) {
 	}
 }
 
-func (p *IINAPlayer) wait(cmd *exec.Cmd) {
+func (p *IINAPlayer) wait(cmd command) {
 	_ = cmd.Wait()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -261,7 +300,7 @@ func (p *IINAPlayer) waitForIPC(ctx context.Context, sockPath string) error {
 		if time.Now().After(deadline) {
 			return lastErr
 		}
-		timer := time.NewTimer(25 * time.Millisecond)
+		timer := time.NewTimer(p.ipcPoll)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -275,7 +314,7 @@ func (p *IINAPlayer) connect(sockPath string) (net.Conn, error) {
 	if sockPath == "" {
 		return nil, fmt.Errorf("iina ipc socket path is empty")
 	}
-	conn, err := net.Dial("unix", sockPath)
+	conn, err := p.dial("unix", sockPath)
 	if err != nil {
 		return nil, fmt.Errorf("connect to iina ipc socket fail: %w", err)
 	}
@@ -317,8 +356,8 @@ func (p *IINAPlayer) Stop(ctx context.Context) error {
 	// every child is reaped exactly once.
 	stopErr := p.closeLocked()
 
-	if p.command != nil && p.command.Process != nil {
-		if err := p.command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if p.command != nil {
+		if err := p.command.Kill(); err != nil {
 			if stopErr != nil {
 				return fmt.Errorf("multiple errors: %w, killing process: %v", stopErr, err)
 			}
