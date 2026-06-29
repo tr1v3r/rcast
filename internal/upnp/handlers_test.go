@@ -7,78 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/player"
 	"github.com/tr1v3r/rcast/internal/state"
 )
-
-type handlerFakePlayer struct {
-	mu            sync.Mutex
-	plays         int
-	stops         int
-	playbackStops int
-	volumes       []int
-	titles        []string
-	pauseErr      error
-}
-
-func (p *handlerFakePlayer) Play(context.Context, string, int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.plays++
-	return nil
-}
-
-func (p *handlerFakePlayer) Pause(context.Context) error { return p.pauseErr }
-
-func (p *handlerFakePlayer) StopPlayback(context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.playbackStops++
-	return nil
-}
-
-func (p *handlerFakePlayer) SetVolume(_ context.Context, volume int) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.volumes = append(p.volumes, volume)
-	return nil
-}
-
-func (p *handlerFakePlayer) SetMute(context.Context, bool) error { return nil }
-
-func (p *handlerFakePlayer) SetFullscreen(context.Context, bool) error { return nil }
-
-func (p *handlerFakePlayer) SetTitle(_ context.Context, title string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.titles = append(p.titles, title)
-	return nil
-}
-
-func (p *handlerFakePlayer) Screenshot(context.Context, string) error { return nil }
-
-func (p *handlerFakePlayer) SetSpeed(context.Context, float64) error { return nil }
-
-func (p *handlerFakePlayer) Seek(context.Context, float64) error { return nil }
-
-func (p *handlerFakePlayer) GetPosition(context.Context) (float64, error) {
-	return 0, nil
-}
-
-func (p *handlerFakePlayer) GetDuration(context.Context) (float64, error) {
-	return 0, nil
-}
-
-func (p *handlerFakePlayer) Stop(context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stops++
-	return nil
-}
 
 func TestXMLTextAcceptsArbitraryNamespace(t *testing.T) {
 	body := []byte(`<s:Envelope xmlns:s="soap"><s:Body><x:Action xmlns:x="service"><x:CurrentURI>https://example.test/a?x=1&amp;y=2</x:CurrentURI></x:Action></s:Body></s:Envelope>`)
@@ -330,22 +264,4 @@ func TestTimeToSecondsValidation(t *testing.T) {
 			t.Errorf("timeToSeconds(%q) unexpectedly succeeded", invalid)
 		}
 	}
-}
-
-func soapBody(inner string) string {
-	return `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Action xmlns:u="service">` + inner + `</u:Action></s:Body></s:Envelope>`
-}
-
-func serveAction(handler http.Handler, action, body, remote string) *httptest.ResponseRecorder {
-	return serveActionWithUserAgent(handler, action, body, remote, "")
-}
-
-func serveActionWithUserAgent(handler http.Handler, action, body, remote, userAgent string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/control", strings.NewReader(body))
-	req.Header.Set("SOAPACTION", `"service#`+action+`"`)
-	req.Header.Set("User-Agent", userAgent)
-	req.RemoteAddr = remote
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
 }

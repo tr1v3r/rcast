@@ -66,14 +66,35 @@ func main() {
 	}
 }
 
+// serverDeps bundles the external collaborators of runServer so they can be
+// replaced in tests. All fields are required; production wiring lives in
+// runServer.
+type serverDeps struct {
+	uuidLoader func(path string) (string, error)
+	resolveIP  func() (string, error)
+	listen     func(network, addr string) (net.Listener, error)
+	announce   func(ctx context.Context, baseURL, deviceUUID, serverName string)
+	search     func(ctx context.Context, baseURL, deviceUUID, serverName string)
+}
+
 func runServer(ctx context.Context, cfg config.Config) error {
+	return runServerWithRuntime(ctx, cfg, serverDeps{
+		uuidLoader: uuid.LoadOrCreate,
+		resolveIP:  netutil.FirstUsableIPv4,
+		listen:     net.Listen,
+		announce:   ssdp.Announce,
+		search:     ssdp.SearchResponder,
+	})
+}
+
+func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDeps) error {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// 设备 UUID
-	deviceUUID, err := uuid.LoadOrCreate(cfg.UUIDPath)
+	deviceUUID, err := deps.uuidLoader(cfg.UUIDPath)
 	if err != nil {
 		return fmt.Errorf("load device UUID: %w", err)
 	}
@@ -87,13 +108,25 @@ func runServer(ctx context.Context, cfg config.Config) error {
 		}
 		ip = parsed.To4().String()
 	} else {
-		ip, err = netutil.FirstUsableIPv4()
+		ip, err = deps.resolveIP()
 		if err != nil {
 			log.Error("no IPv4: %v", err)
 			return err
 		}
 	}
-	baseURL := fmt.Sprintf("http://%s:%d", ip, cfg.HTTPPort)
+
+	// HTTP listener (created before baseURL so port 0 resolves to the real port)
+	ln, err := deps.listen("tcp", fmt.Sprintf(":%d", cfg.HTTPPort))
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	port := cfg.HTTPPort
+	if port == 0 {
+		if a, ok := ln.Addr().(*net.TCPAddr); ok {
+			port = a.Port
+		}
+	}
+	baseURL := fmt.Sprintf("http://%s:%d", ip, port)
 
 	// 状态
 	st := state.New(ctx, cfg)
@@ -112,14 +145,14 @@ func runServer(ctx context.Context, cfg config.Config) error {
 	}
 
 	// SSDP
-	go ssdp.Announce(ctx, baseURL, deviceUUID, serverName)
-	go ssdp.SearchResponder(ctx, baseURL, deviceUUID, serverName)
+	go deps.announce(ctx, baseURL, deviceUUID, serverName)
+	go deps.search(ctx, baseURL, deviceUUID, serverName)
 
 	// 启动 HTTP
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Info("HTTP listening on %s", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
 	}()

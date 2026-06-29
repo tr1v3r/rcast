@@ -40,7 +40,8 @@ LINT_SOURCE := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(LINT_VER
 .DEFAULT_GOAL := help
 
 .PHONY: all build build-dev build-all run run-dev \
-	test race-test test-coverage vet lint fmt format fmt-check format-check \
+	test race-test test-coverage coverage-check test-integration \
+	vet lint fmt format fmt-check format-check \
 	tidy tidy-check check dev ci tools fmt-tool-check lint-tool-check \
 	deps prepare clean clean-all version help FORCE
 
@@ -91,10 +92,19 @@ test: ## Run unit tests
 race-test: ## Run tests with the race detector
 	@GOWORK=$(GOWORK) $(GO) test $(GO_FLAGS) $(GO_TEST_FLAGS) -race ./...
 
-test-coverage: ## Generate an HTML coverage report
-	@GOWORK=$(GOWORK) $(GO) test $(GO_FLAGS) $(GO_TEST_FLAGS) -coverprofile=coverage.out ./...
+test-coverage: ## Generate an HTML coverage report (cross-package)
+	@GOWORK=$(GOWORK) $(GO) test $(GO_FLAGS) $(GO_TEST_FLAGS) -coverpkg=./... -coverprofile=coverage.out ./...
 	@$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+coverage-check: ## Fail if cross-package coverage is below 75%
+	@GOWORK=$(GOWORK) $(GO) test $(GO_FLAGS) -coverpkg=./... -coverprofile=coverage.out ./...
+	@total=$$($(GO) tool cover -func=coverage.out | awk '/^total:/ {gsub("%",""); print $$NF}'); \
+	echo "Total coverage: $$total%"; \
+	awk -v t=$$total 'BEGIN { if (t+0 < 75) { printf "FAIL: coverage %s%% < 75%%\n", t; exit 1 } else { printf "OK: coverage %s%% >= 75%%\n", t } }'
+
+test-integration: ## Run the opt-in real-IINA integration tests (needs RCAST_TEST_MEDIA)
+	@GOWORK=$(GOWORK) $(GO) test $(GO_FLAGS) -tags=integration ./internal/player
 
 vet: ## Run go vet
 	@GOWORK=$(GOWORK) $(GO) vet $(GO_FLAGS) ./...
@@ -150,7 +160,7 @@ dev: ## Format, validate, test, and build for local development
 	@$(MAKE) vet lint race-test build
 	@echo "Development workflow completed successfully"
 
-ci: tidy-check fmt-check vet lint race-test test-coverage build ## CI workflow; never modifies source files
+ci: tidy-check fmt-check vet lint race-test coverage-check build ## CI workflow; never modifies source files
 	@echo "CI workflow completed successfully"
 
 # ==============================================================================
