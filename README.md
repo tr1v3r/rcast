@@ -1,5 +1,7 @@
 # Rcast - Go DLNA MediaRenderer for macOS (IINA)
 
+[![CI](https://github.com/tr1v3r/rcast/actions/workflows/ci.yml/badge.svg)](https://github.com/tr1v3r/rcast/actions/workflows/ci.yml)
+
 A lightweight DLNA/UPnP AV MediaRenderer (DMR) written in Go for macOS.  
 It announces itself on your LAN, accepts external cast/control requests from DLNA control points, and plays media via IINA.  
 Includes session ownership (single-controller at a time) and optional system volume linkage.
