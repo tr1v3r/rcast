@@ -102,7 +102,7 @@ The player component integrates with IINA through multiple methods:
 
 ## Development Notes
 
-- The codebase is written in Go 1.25.3
+- The codebase is written in Go 1.27
 - Key deps: `github.com/tr1v3r/pkg/log` (logging), `github.com/urfave/cli/v3` (CLI flags), `github.com/google/uuid`
 - Thread-safe state management with sync.RWMutex
 - macOS-specific features (system volume control) are isolated in Darwin-specific files
