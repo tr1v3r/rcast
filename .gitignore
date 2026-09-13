@@ -34,3 +34,7 @@ go.work.sum
 # .vscode/
 dmr_uuid.txt
 .trae/
+
+# Agent-team runtime state and parallel git worktrees
+.agent-teams/
+.worktrees/

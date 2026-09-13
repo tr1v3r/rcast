@@ -3,6 +3,7 @@ package upnp
 import (
 	"context"
 	"errors"
+	"html"
 	"net/http"
 	"strings"
 	"testing"
@@ -446,10 +447,10 @@ func TestGetPositionInfo_FormatsFromSpy(t *testing.T) {
 	defer cleanup()
 	handler := AVTransportHandler(st, config.Config{})
 	const remote = "10.0.0.1:1"
-	// Use a URI with a query string; escape the ampersand so the SOAP body
-	// remains valid XML while the stored URI keeps the raw form.
+	// Use a URI with a query string; escape it for XML so the SOAP body
+	// remains valid while the stored URI keeps the raw form.
 	const uri = "https://example.test/v.mp4?token=abc&x=1"
-	uriBody := soapBody(`<CurrentURI>https://example.test/v.mp4?token=abc&amp;x=1</CurrentURI>`)
+	uriBody := soapBody("<CurrentURI>" + html.EscapeString(uri) + "</CurrentURI>")
 	if rec := serveAction(handler, "SetAVTransportURI", uriBody, remote); rec.Code != http.StatusOK {
 		t.Fatalf("setup SetURI status=%d body=%s", rec.Code, rec.Body.String())
 	}
