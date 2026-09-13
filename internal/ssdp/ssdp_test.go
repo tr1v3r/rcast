@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -478,20 +479,43 @@ func waitForAttempts(t *testing.T, c *errorCountingConn, want int) {
 	t.Fatalf("waitForAttempts: got %d, want >= %d", got, want)
 }
 
-func TestAnnounceDialFails(t *testing.T) {
-	orig := dialAnnounce
-	dialAnnounce = func(*net.UDPAddr) (packetConn, error) { return nil, errors.New("nope") }
-	t.Cleanup(func() { dialAnnounce = orig })
+// TestAnnounceDialFailureRetriesUntilCancel replaces the pre-M6 expectation
+// that Announce gives up as soon as the dial fails: at boot the network may
+// not be up yet, so the loop now retries with backoff until ctx is done.
+func TestAnnounceDialFailureRetriesUntilCancel(t *testing.T) {
+	origDial, origBase, origMax := dialAnnounce, startupRetryBase, startupRetryMax
+	var attempts atomic.Int32
+	dialAnnounce = func(*net.UDPAddr) (packetConn, error) {
+		attempts.Add(1)
+		return nil, errors.New("nope")
+	}
+	startupRetryBase, startupRetryMax = time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		dialAnnounce = origDial
+		startupRetryBase, startupRetryMax = origBase, origMax
+	})
 
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		Announce(context.Background(), "http://192.0.2.1:8200", "uuid:df", "rcast/1.0")
+		Announce(ctx, "http://192.0.2.1:8200", "uuid:df", "rcast/1.0")
 		close(done)
 	}()
+
+	// Retries keep accumulating while dial keeps failing.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && attempts.Load() < 3 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("dial attempts = %d, want >= 3 (retry loop not running)", got)
+	}
+
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatalf("Announce should return immediately when dial fails")
+		t.Fatalf("Announce did not return after cancel while dial retries kept failing")
 	}
 }
 
