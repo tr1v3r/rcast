@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/tr1v3r/rcast/internal/state"
 )
 
 const maxSOAPBodyBytes = 1 << 20
@@ -47,6 +49,55 @@ func WriteSOAPResponse(w http.ResponseWriter, namespace, respName, inner string)
 </s:Envelope>`)
 
 	_, _ = w.Write([]byte(builder.String()))
+}
+
+// bufferedSOAPResponse captures a command response while PlayerState's command
+// lock is held. flush performs the actual client write after the lock is
+// released, so a slow/disconnected controller cannot stall later commands.
+type bufferedSOAPResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newBufferedSOAPResponse() *bufferedSOAPResponse {
+	return &bufferedSOAPResponse{header: make(http.Header)}
+}
+
+func (r *bufferedSOAPResponse) Header() http.Header { return r.header }
+
+func (r *bufferedSOAPResponse) WriteHeader(status int) {
+	if r.status == 0 {
+		r.status = status
+	}
+}
+
+func (r *bufferedSOAPResponse) Write(body []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.body.Write(body)
+}
+
+func (r *bufferedSOAPResponse) flush(w http.ResponseWriter) {
+	for key, values := range r.header {
+		w.Header()[key] = append([]string(nil), values...)
+	}
+	status := r.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(r.body.Bytes())
+}
+
+func serializeSOAP(st *state.PlayerState, w http.ResponseWriter, fn func(http.ResponseWriter)) {
+	response := state.SerializeResult(st, func() *bufferedSOAPResponse {
+		buffer := newBufferedSOAPResponse()
+		fn(buffer)
+		return buffer
+	})
+	response.flush(w)
 }
 
 func WriteSOAPError(w http.ResponseWriter, code int, desc string) {
