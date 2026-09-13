@@ -34,6 +34,9 @@ type PlayerState struct {
 	volumeMapping  volumeMapping
 	mute           bool
 
+	subscribers      map[uint64]*subscription
+	nextSubscriberID uint64
+
 	sessionOwner string
 	sessionSince time.Time
 	sessionUsed  time.Time
@@ -129,6 +132,8 @@ func (s *PlayerState) Stop() {
 	s.sessionSince = time.Time{}
 	s.sessionUsed = time.Time{}
 	s.volumeMapping = volumeMapping{}
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
 	s.mu.Unlock()
 }
 
@@ -153,11 +158,15 @@ func (s *PlayerState) reapExpiredPlayer() {
 	playerExpired := s.player != nil && time.Since(s.playerLastUsed) > playerMaxIdle
 	sessionExpired := s.player == nil && s.sessionOwner != "" && time.Since(s.sessionUsed) > playerMaxIdle
 	expired := playerExpired || sessionExpired
+	var snapshot Snapshot
+	var subscribers []*subscription
 	if expired {
 		s.sessionOwner = ""
 		s.sessionSince = time.Time{}
 		s.sessionUsed = time.Time{}
 		s.volumeMapping = volumeMapping{}
+		snapshot, subscribers = s.notificationLocked()
+		notify(snapshot, subscribers)
 	}
 	s.mu.Unlock()
 	if expired {
@@ -173,16 +182,20 @@ func (s *PlayerState) GetURI() (string, string) {
 
 func (s *PlayerState) SetURI(uri, meta string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.transportURI = uri
 	s.transportMeta = meta
 	s.transportState = "STOPPED"
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 }
 
 func (s *PlayerState) SetTransportState(st string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.transportState = st
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 }
 
 func (s *PlayerState) GetTransportState() string {
@@ -199,9 +212,11 @@ func (s *PlayerState) GetVolume() int {
 
 func (s *PlayerState) SetVolume(v int) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.volume = v
 	s.volumeMapping = volumeMapping{}
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 }
 
 // PreviewVolumeRequest translates a controller-domain volume without changing
@@ -215,10 +230,12 @@ func (s *PlayerState) PreviewVolumeRequest(controller string, requested int, sca
 
 func (s *PlayerState) CommitVolumeRequest(controller string, requested int, scale float64) int {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	applied, mapping := mapVolumeRequest(s.volume, s.volumeMapping, controller, requested, scale)
 	s.volume = applied
 	s.volumeMapping = mapping
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 	return applied
 }
 
@@ -257,8 +274,10 @@ func (s *PlayerState) GetMute() bool {
 
 func (s *PlayerState) SetMute(m bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.mute = m
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 }
 
 func (s *PlayerState) HasSession(controller string) bool {
@@ -272,20 +291,24 @@ func (s *PlayerState) HasSession(controller string) bool {
 // when preempted before executing the new action.
 func (s *PlayerState) AcquireSession(controller string, allowPreempt bool) (acquired, preempted bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.sessionOwner == "" {
 		now := time.Now()
 		s.sessionOwner = controller
 		s.sessionSince = now
 		s.sessionUsed = now
 		s.volumeMapping = volumeMapping{}
+		snapshot, subscribers := s.notificationLocked()
+		notify(snapshot, subscribers)
+		s.mu.Unlock()
 		return true, false
 	}
 	if s.sessionOwner == controller {
 		s.sessionUsed = time.Now()
+		s.mu.Unlock()
 		return true, false
 	}
 	if !allowPreempt {
+		s.mu.Unlock()
 		return false, false
 	}
 	now := time.Now()
@@ -294,19 +317,25 @@ func (s *PlayerState) AcquireSession(controller string, allowPreempt bool) (acqu
 	s.sessionUsed = now
 	s.transportState = "STOPPED"
 	s.volumeMapping = volumeMapping{}
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 	return true, true
 }
 
 func (s *PlayerState) ReleaseSession(controller string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.sessionOwner != controller {
+		s.mu.Unlock()
 		return
 	}
 	s.sessionOwner = ""
 	s.sessionSince = time.Time{}
 	s.sessionUsed = time.Time{}
 	s.volumeMapping = volumeMapping{}
+	snapshot, subscribers := s.notificationLocked()
+	notify(snapshot, subscribers)
+	s.mu.Unlock()
 }
 
 func (s *PlayerState) GetSessionOwner() string {
