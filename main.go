@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 )
 
 const serverName = "RCast-DMR/1.1" // "GoDLNA-DMR/1.1"
+
+// ssdpShutdownGrace bounds how long shutdown waits for the announce/search
+// loops to flush their ssdp:byebye messages before exiting anyway (audit
+// LOW-8: a fast exit used to race the byebye flush and lose all 6 messages).
+var ssdpShutdownGrace = 2 * time.Second
 
 var (
 	version   = "dev"
@@ -73,8 +79,8 @@ type serverDeps struct {
 	uuidLoader func(path string) (string, error)
 	resolveIP  func() (string, error)
 	listen     func(network, addr string) (net.Listener, error)
-	announce   func(ctx context.Context, baseURL, deviceUUID, serverName string)
-	search     func(ctx context.Context, baseURL, deviceUUID, serverName string)
+	announce   func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
+	search     func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
 }
 
 func runServer(ctx context.Context, cfg config.Config) error {
@@ -82,8 +88,8 @@ func runServer(ctx context.Context, cfg config.Config) error {
 		uuidLoader: uuid.LoadOrCreate,
 		resolveIP:  netutil.FirstUsableIPv4,
 		listen:     net.Listen,
-		announce:   ssdp.Announce,
-		search:     ssdp.SearchResponder,
+		announce:   ssdp.AnnounceTracking,
+		search:     ssdp.SearchResponderTracking,
 	})
 }
 
@@ -101,7 +107,8 @@ func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDep
 
 	// 网卡 IP
 	ip := cfg.AdvertiseIP
-	if ip != "" {
+	pinned := ip != ""
+	if pinned {
 		parsed := net.ParseIP(ip)
 		if parsed == nil || parsed.To4() == nil {
 			return fmt.Errorf("DMR_ADVERTISE_IP must be an IPv4 address: %q", ip)
@@ -144,9 +151,25 @@ func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDep
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// SSDP
-	go deps.announce(ctx, baseURL, deviceUUID, serverName)
-	go deps.search(ctx, baseURL, deviceUUID, serverName)
+	// SSDP：动态选网时 base URL 通过共享 source 跟随主机 IP 变化（审计
+	// M7：网络切换后 LOCATION 不再陈旧）；固定 DMR_ADVERTISE_IP 时锁定不变。
+	loc := ssdp.NewFixedBaseURL(baseURL)
+	if !pinned {
+		loc = ssdp.NewBaseURLSource(baseURL)
+	}
+
+	// Announce/search goroutines are tracked so shutdown waits for the
+	// ssdp:byebye flush instead of racing process exit (audit LOW-8).
+	var ssdpWG sync.WaitGroup
+	ssdpWG.Add(2)
+	go func() {
+		defer ssdpWG.Done()
+		deps.announce(ctx, loc, deviceUUID, serverName)
+	}()
+	go func() {
+		defer ssdpWG.Done()
+		deps.search(ctx, loc, deviceUUID, serverName)
+	}()
 
 	// 启动 HTTP
 	serverErr := make(chan error, 1)
@@ -164,13 +187,66 @@ func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDep
 	case err := <-serverErr:
 		runErr = fmt.Errorf("HTTP server: %w", err)
 	}
+
+	// Once shutdown begins, a second SIGINT/SIGTERM must terminate the
+	// process immediately; NotifyContext swallows extra signals after the
+	// first one, leaving no way to abort a slow shutdown.
+	disarmForceExit := armForceExit()
+	defer disarmForceExit()
+
 	cancel()
 	ctxShutdown, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
 	if err := srv.Shutdown(ctxShutdown); err != nil && runErr == nil {
 		runErr = fmt.Errorf("shutting down HTTP server: %w", err)
 	}
+
+	// Give the SSDP loops a bounded window to flush their byebye messages
+	// (audit LOW-8: a fast exit used to drop all six).
+	waitBounded(&ssdpWG, ssdpShutdownGrace, "SSDP loops")
+
 	log.Info("bye")
 
 	return runErr
+}
+
+// armForceExit installs a signal handler that hard-exits the process when a
+// second SIGINT/SIGTERM arrives while shutdown is in flight. The returned
+// function disarms the handler once graceful shutdown completes.
+func armForceExit() (disarm func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			log.Warn("signal %v during shutdown; forcing exit", sig)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			signal.Stop(sigs)
+		})
+	}
+}
+
+// waitBounded waits for wg up to grace, logging a warning if it never
+// finishes.
+func waitBounded(wg *sync.WaitGroup, grace time.Duration, what string) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Warn("%s did not stop within %s; continuing shutdown", what, grace)
+	}
 }

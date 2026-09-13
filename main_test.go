@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/ssdp"
 	"github.com/tr1v3r/rcast/internal/uuid"
 )
 
@@ -37,9 +41,9 @@ func newRecordedSSDP() *recordedSSDP {
 	}
 }
 
-func (r *recordedSSDP) announceFn(ctx context.Context, baseURL, deviceUUID, serverName string) {
+func (r *recordedSSDP) announceFn(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string) {
 	r.mu.Lock()
-	r.announce = append(r.announce, callArgs{baseURL, deviceUUID, serverName})
+	r.announce = append(r.announce, callArgs{loc.Get(), deviceUUID, serverName})
 	r.mu.Unlock()
 	select {
 	case r.annCh <- struct{}{}:
@@ -47,9 +51,9 @@ func (r *recordedSSDP) announceFn(ctx context.Context, baseURL, deviceUUID, serv
 	}
 }
 
-func (r *recordedSSDP) searchFn(ctx context.Context, baseURL, deviceUUID, serverName string) {
+func (r *recordedSSDP) searchFn(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string) {
 	r.mu.Lock()
-	r.search = append(r.search, callArgs{baseURL, deviceUUID, serverName})
+	r.search = append(r.search, callArgs{loc.Get(), deviceUUID, serverName})
 	r.mu.Unlock()
 	select {
 	case r.srchCh <- struct{}{}:
@@ -288,4 +292,152 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- Shutdown regression tests (audit LOW-8 + swallowed second SIGINT) ---
+
+// TestRunServer_WaitsForSSDPFlushBeforeExit proves shutdown does not return
+// while the announce loop is still flushing its ssdp:byebye messages (audit
+// LOW-8: process exit used to race the flush and lose all 6 messages).
+func TestRunServer_WaitsForSSDPFlushBeforeExit(t *testing.T) {
+	cfg := newBaseConfig(t)
+	deps, _ := newBaseDeps(t)
+
+	started := make(chan struct{}, 1)
+	flushed := make(chan struct{})
+	deps.announce = func(ctx context.Context, _ *ssdp.BaseURLSource, _, _ string) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		// Simulate the byebye flush taking a moment to leave the socket.
+		<-ctx.Done()
+		time.Sleep(150 * time.Millisecond)
+		close(flushed)
+	}
+	deps.search = func(context.Context, *ssdp.BaseURLSource, string, string) {}
+
+	done, cancel := runWithCancel(context.Background(), cfg, deps)
+	waitFor(t, started, "announce started")
+	cancel()
+
+	select {
+	case <-flushed:
+		// Good: shutdown waited for the flush.
+	case err := <-done:
+		t.Fatalf("runServer returned before the SSDP byebye flush finished (err=%v)", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for byebye flush")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("clean shutdown returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runServer did not return after the flush")
+	}
+}
+
+// TestRunServer_SSDPShutdownIsBounded proves a stuck SSDP loop cannot hang
+// shutdown forever: the wait is capped by ssdpShutdownGrace.
+func TestRunServer_SSDPShutdownIsBounded(t *testing.T) {
+	origGrace := ssdpShutdownGrace
+	ssdpShutdownGrace = 50 * time.Millisecond
+	t.Cleanup(func() { ssdpShutdownGrace = origGrace })
+
+	cfg := newBaseConfig(t)
+	deps, _ := newBaseDeps(t)
+	started := make(chan struct{}, 1)
+	deps.announce = func(ctx context.Context, _ *ssdp.BaseURLSource, _, _ string) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		// Never flushes in time: still sleeping long after the grace ends.
+		time.Sleep(2 * time.Second)
+	}
+	deps.search = func(context.Context, *ssdp.BaseURLSource, string, string) {}
+
+	done, cancel := runWithCancel(context.Background(), cfg, deps)
+	waitFor(t, started, "announce started")
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("shutdown returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown hung waiting for a stuck SSDP loop (wait is not bounded)")
+	}
+}
+
+// TestSecondSignalForcesExit runs the test binary as a child process, drives
+// a real runServerWithRuntime through two SIGINTs, and asserts the second one
+// force-exits (code 130) instead of being swallowed by NotifyContext.
+// Without the fix the child shuts down gracefully and exits 0.
+func TestSecondSignalForcesExit(t *testing.T) {
+	if os.Getenv("RCAST_TEST_SECOND_SIGNAL") == "1" {
+		secondSignalHelperProc(t)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestSecondSignalForcesExit$", "-test.timeout=1m")
+	cmd.Env = append(os.Environ(), "RCAST_TEST_SECOND_SIGNAL=1")
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("child did not exit on its own: err=%v\noutput:\n%s", err, out)
+	}
+	if code := exitErr.ExitCode(); code != 130 {
+		t.Fatalf("child exit code = %d, want 130 (second signal must force exit; graceful exit would be 0)\noutput:\n%s", code, out)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("forced exit took %s; the second signal was not honored promptly", elapsed)
+	}
+}
+
+// secondSignalHelperProc is the child half of TestSecondSignalForcesExit: it
+// starts the server with an announce fake that lingers 600ms after ctx is
+// done (simulating a slow byebye flush), then sends itself SIGINT twice.
+// With the force-exit fix the second SIGINT kills the process with code 130
+// before the graceful path can finish.
+func secondSignalHelperProc(t *testing.T) {
+	cfg := newBaseConfig(t)
+	deps, _ := newBaseDeps(t)
+
+	started := make(chan struct{}, 1)
+	deps.announce = func(ctx context.Context, _ *ssdp.BaseURLSource, _, _ string) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		// Slow flush: without a forced exit the process lingers here and
+		// eventually exits 0.
+		time.Sleep(600 * time.Millisecond)
+	}
+	deps.search = func(context.Context, *ssdp.BaseURLSource, string, string) {}
+
+	done := make(chan error, 1)
+	go func() { done <- runServerWithRuntime(context.Background(), cfg, deps) }()
+
+	<-started
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	time.Sleep(150 * time.Millisecond)
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+
+	// Only reached when the second signal was swallowed: complete the
+	// graceful path so the parent can tell the two outcomes apart by exit
+	// code (0 here vs 130 with the fix).
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+	}
 }
