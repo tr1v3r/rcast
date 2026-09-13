@@ -131,29 +131,36 @@ func TestSetVolume_NoPlayerStillUpdatesState(t *testing.T) {
 	}
 }
 
-func TestSetVolume_AnotherControllerOwnsSessionPreemptDisabled(t *testing.T) {
+func TestSetVolume_SessionIndependent(t *testing.T) {
 	st, cleanup := newRCState(t, nil)
 	defer cleanup()
+	// RenderingControl actions are independent of the AVTransport session
+	// (audit M1): even with preemption disabled a SetVolume from any
+	// controller succeeds and never acquires or contends a session.
 	cfg := config.Config{AllowSessionPreempt: false}
 	handler := RenderingControlHandler(st, cfg)
 
-	// First controller acquires the session and sets volume.
+	// First controller sets volume.
 	if rec := serveAction(handler, "SetVolume", soapBody(`<DesiredVolume>30</DesiredVolume>`), "10.0.0.1:1"); rec.Code != http.StatusOK {
 		t.Fatalf("first SetVolume status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// Second controller refused.
+	// Second controller is not refused.
 	rec := serveAction(handler, "SetVolume", soapBody(`<DesiredVolume>80</DesiredVolume>`), "10.0.0.2:1")
-	assertUPnPError(t, rec, 712)
-	if got := st.GetVolume(); got != 30 {
-		t.Fatalf("volume=%d, want 30 (unchanged by refused request)", got)
+	assertSOAPSuccess(t, rec, "SetVolumeResponse")
+	if got := st.GetVolume(); got != 80 {
+		t.Fatalf("volume=%d, want 80 (second controller volume applies)", got)
+	}
+	// RCS alone never creates a session.
+	if owner := st.GetSessionOwner(); owner != "" {
+		t.Fatalf("owner=%q, want empty (SetVolume must not acquire a session)", owner)
 	}
 }
 
 func TestSetVolume_ControllerSwitchResetsVolumeMapping(t *testing.T) {
 	st, cleanup := newRCState(t, nil)
 	defer cleanup()
-	// Preemption is required for a different controller to take over the
-	// session; without it the second SetVolume would be refused with 712.
+	// Volume is session-independent (audit M1), so controller switching here
+	// exercises only the per-controller mapping re-anchoring.
 	cfg := config.Config{AllowSessionPreempt: true}
 	handler := RenderingControlHandler(st, cfg)
 	const awemeUA = "Aweme/390012 CFNetwork/3860.300.31 Darwin/25.2.0"
@@ -166,8 +173,9 @@ func TestSetVolume_ControllerSwitchResetsVolumeMapping(t *testing.T) {
 	if got := st.GetReportedVolume("10.0.0.1", awemeIOSVolumeScale); got != 60 {
 		t.Fatalf("aweme reported=%d, want 60", got)
 	}
-	// A different controller takes over (preempt); the mapping must reset so its
-	// raw request maps 1:1 to the applied value.
+	// A different controller (plain UA, so no compatibility scaling) adjusts
+	// volume; the per-controller mapping re-anchors for the new controller so
+	// its raw request maps 1:1 to the applied value.
 	if rec := serveAction(handler, "SetVolume", soapBody(`<DesiredVolume>50</DesiredVolume>`), "10.0.0.2:1"); rec.Code != http.StatusOK {
 		t.Fatalf("second SetVolume status=%d body=%s", rec.Code, rec.Body.String())
 	}
