@@ -203,9 +203,9 @@ func TestStopPlayerErrorDoesNotDeadlock(t *testing.T) {
 	if fake.stops() != 1 {
 		t.Fatalf("Stop invoked %d times, want 1", fake.stops())
 	}
-	// Subsequent StopPlayer should now find no player.
-	if err := st.StopPlayer(); err != nil {
-		t.Fatalf("StopPlayer after stop = %v, want nil", err)
+	// A failed stop keeps the player reachable and retryable.
+	if got := st.GetActivePlayer(); got != fake {
+		t.Fatalf("player after failed stop = %v, want original", got)
 	}
 }
 

@@ -62,7 +62,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			// the AVTransport session: a second control point adjusting volume
 			// must not preempt the session or stop playback (audit M1), so
 			// SetVolume deliberately skips requireSession.
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				appliedVolume := st.PreviewVolumeRequest(controller, v, volumeScale)
 				if p := st.GetActivePlayer(); p != nil {
 					if err := p.SetVolume(ctx, appliedVolume); err != nil {
@@ -98,7 +98,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			m := mStr == "1" || mStr == "true"
 			// Mute shares the renderer-global, session-independent semantics
 			// of volume (audit M1): no requireSession here either.
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if p := st.GetActivePlayer(); p != nil {
 					if err := p.SetMute(ctx, m); err != nil {
 						monitoring.GetMetrics().RecordUPnPError()

@@ -23,16 +23,26 @@ type PlayerState struct {
 	commandMu sync.Mutex
 	mu        sync.RWMutex
 
-	player         player.Player
-	playerLastUsed time.Time
-	playerFactory  PlayerFactory
+	player               player.Player
+	playerLastUsed       time.Time
+	playerFactory        PlayerFactory
+	playerGeneration     uint64
+	clearTransportOnStop bool
 
 	transportURI   string
 	transportMeta  string
 	transportState string
-	volume         int
-	volumeMapping  volumeMapping
-	mute           bool
+	// finalPosition/finalDuration pin where the last playback naturally ended
+	// (audit M2, state half): media that finishes by itself leaves the
+	// keep-open player paused at the end, and once that window is gone a late
+	// observer should still be able to report RelTime=duration instead of
+	// 00:00:00.
+	finalPosition      float64
+	finalDuration      float64
+	finalPositionValid bool
+	volume             int
+	volumeMapping      volumeMapping
+	mute               bool
 
 	sessionOwner string
 	sessionSince time.Time
@@ -65,12 +75,22 @@ func NewWithPlayerFactory(ctx context.Context, _ config.Config, factory PlayerFa
 
 func (s *PlayerState) Context() context.Context { return s.ctx }
 
-// Serialize ensures mutating UPnP actions execute in arrival order instead of
-// racing independent player goroutines.
+// Serialize ensures mutating actions execute in arrival order.
 func (s *PlayerState) Serialize(fn func()) {
+	SerializeResult(s, func() struct{} {
+		fn()
+		return struct{}{}
+	})
+}
+
+// SerializeResult runs a mutating command in arrival order and returns the
+// computed result after releasing the command lock. Callers can therefore
+// render a response into memory in fn and perform potentially slow network I/O
+// only after this function returns.
+func SerializeResult[T any](s *PlayerState, fn func() T) T {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
-	fn()
+	return fn()
 }
 
 func (s *PlayerState) EnsurePlayer() player.Player {
@@ -78,10 +98,69 @@ func (s *PlayerState) EnsurePlayer() player.Player {
 	defer s.mu.Unlock()
 	s.playerLastUsed = time.Now()
 	if s.player == nil {
-		s.player = s.playerFactory()
+		p := s.playerFactory()
+		s.player = p
+		s.playerGeneration++
+		generation := s.playerGeneration
+		s.finalPositionValid = false
+		if events, ok := p.(interface{ OnEvent(func(player.Event)) }); ok {
+			events.OnEvent(func(event player.Event) {
+				s.handlePlayerEvent(p, generation, event)
+			})
+		}
 		monitoring.GetMetrics().RecordPlayerSession()
 	}
 	return s.player
+}
+
+func (s *PlayerState) handlePlayerEvent(source player.Player, generation uint64, event player.Event) {
+	if event.Name != "end-file" {
+		return
+	}
+
+	// Query without s.mu held: event handlers are allowed to call back into the
+	// player, and an IPC round trip must never block state readers.
+	duration, err := source.GetDuration(s.ctx)
+	if err != nil {
+		log.CtxWarn(s.ctx, "get duration after playback end: %v", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A late event from a preempted/stopped player must not overwrite the new
+	// player's state.
+	if s.player == nil || s.playerGeneration != generation {
+		return
+	}
+	s.transportState = "STOPPED"
+	if err == nil && duration >= 0 {
+		s.finalPosition = duration
+		s.finalDuration = duration
+		s.finalPositionValid = true
+	}
+}
+
+// GetPlaybackPosition returns the last known position and duration. Natural
+// playback completion is pinned at the media duration even after the player
+// window has been reaped.
+func (s *PlayerState) GetPlaybackPosition(ctx context.Context) (position, duration float64, positionErr, durationErr error) {
+	s.mu.Lock()
+	if s.finalPositionValid {
+		position, duration = s.finalPosition, s.finalDuration
+		s.mu.Unlock()
+		return position, duration, nil, nil
+	}
+	p := s.player
+	if p != nil {
+		s.playerLastUsed = time.Now()
+	}
+	s.mu.Unlock()
+	if p == nil {
+		return 0, 0, nil, nil
+	}
+	position, positionErr = p.GetPosition(ctx)
+	duration, durationErr = p.GetDuration(ctx)
+	return position, duration, positionErr, durationErr
 }
 
 func (s *PlayerState) GetActivePlayer() player.Player {
@@ -94,41 +173,66 @@ func (s *PlayerState) GetActivePlayer() player.Player {
 }
 
 func (s *PlayerState) StopPlayer() error {
-	p := s.takePlayer()
-	if p == nil {
-		return nil
-	}
-	return p.Stop(s.ctx)
+	return s.stopPlayer(s.ctx)
 }
 
-func (s *PlayerState) takePlayer() player.Player {
-	s.mu.Lock()
+// stopPlayer stops the current player before detaching it. A failed stop keeps
+// the reference reachable so callers can retry instead of orphaning IINA.
+func (s *PlayerState) stopPlayer(ctx context.Context) error {
+	s.mu.RLock()
 	p := s.player
-	s.player = nil
-	s.playerLastUsed = time.Time{}
+	generation := s.playerGeneration
+	s.mu.RUnlock()
+	if p == nil {
+		s.mu.Lock()
+		if s.clearTransportOnStop {
+			s.clearTransportLocked()
+		}
+		s.mu.Unlock()
+		return nil
+	}
+	if err := p.Stop(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.player != nil && s.playerGeneration == generation {
+		s.player = nil
+		s.playerLastUsed = time.Time{}
+		s.transportState = "STOPPED"
+		if s.clearTransportOnStop {
+			s.clearTransportLocked()
+		}
+	}
 	s.mu.Unlock()
-	return p
+	return nil
+}
+
+func (s *PlayerState) clearTransportLocked() {
+	s.transportURI = ""
+	s.transportMeta = ""
+	s.finalPositionValid = false
+	s.clearTransportOnStop = false
 }
 
 func (s *PlayerState) Stop() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 
-	if p := s.takePlayer(); p != nil {
-		// The application context is already cancelled during shutdown. Give
-		// the player a fresh window to deliver mpv's quit command so IINA does
-		// not survive with an orphaned, unlinked IPC socket.
-		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if err := p.Stop(stopCtx); err != nil {
-			log.CtxInfo(s.ctx, "player stop error: %v", err)
-		}
-		cancel()
+	// The application context is already cancelled during shutdown. Give the
+	// player a fresh window to deliver mpv's quit command so IINA does not
+	// survive with an orphaned, unlinked IPC socket.
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := s.stopPlayer(stopCtx); err != nil {
+		log.CtxInfo(s.ctx, "player stop error: %v", err)
 	}
+	cancel()
+
 	s.mu.Lock()
 	s.sessionOwner = ""
 	s.sessionSince = time.Time{}
 	s.sessionUsed = time.Time{}
 	s.volumeMapping = volumeMapping{}
+	s.transportState = "STOPPED"
 	s.mu.Unlock()
 }
 
@@ -149,20 +253,30 @@ func (s *PlayerState) reapExpiredPlayer() {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 
-	s.mu.Lock()
-	playerExpired := s.player != nil && time.Since(s.playerLastUsed) > playerMaxIdle
+	s.mu.RLock()
+	// playerLastUsed measures controller traffic, not playback activity. Never
+	// reap a playing instance merely because its controller went quiet.
+	playerExpired := s.player != nil && s.transportState != "PLAYING" && time.Since(s.playerLastUsed) > playerMaxIdle
 	sessionExpired := s.player == nil && s.sessionOwner != "" && time.Since(s.sessionUsed) > playerMaxIdle
-	expired := playerExpired || sessionExpired
-	if expired {
-		s.sessionOwner = ""
-		s.sessionSince = time.Time{}
-		s.sessionUsed = time.Time{}
-		s.volumeMapping = volumeMapping{}
+	s.mu.RUnlock()
+
+	if playerExpired {
+		if err := s.StopPlayer(); err != nil {
+			log.CtxWarn(s.ctx, "reap expired player: %v", err)
+			return
+		}
 	}
+	if !playerExpired && !sessionExpired {
+		return
+	}
+
+	s.mu.Lock()
+	s.sessionOwner = ""
+	s.sessionSince = time.Time{}
+	s.sessionUsed = time.Time{}
+	s.volumeMapping = volumeMapping{}
+	s.transportState = "STOPPED"
 	s.mu.Unlock()
-	if expired {
-		_ = s.StopPlayer()
-	}
 }
 
 func (s *PlayerState) GetURI() (string, string) {
@@ -177,12 +291,16 @@ func (s *PlayerState) SetURI(uri, meta string) {
 	s.transportURI = uri
 	s.transportMeta = meta
 	s.transportState = "STOPPED"
+	s.finalPositionValid = false
 }
 
 func (s *PlayerState) SetTransportState(st string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.transportState = st
+	if st == "PLAYING" {
+		s.finalPositionValid = false
+	}
 }
 
 func (s *PlayerState) GetTransportState() string {
@@ -283,7 +401,10 @@ func (s *PlayerState) AcquireSession(controller string, allowPreempt bool) (acqu
 	}
 	if s.sessionOwner == controller {
 		s.sessionUsed = time.Now()
-		return true, false
+		// If the previous preemption could not stop the displaced player, keep
+		// reporting preempted so requireSession retries cleanup before allowing
+		// the new owner to act on the predecessor's transport.
+		return true, s.clearTransportOnStop
 	}
 	if !allowPreempt {
 		return false, false
@@ -293,6 +414,7 @@ func (s *PlayerState) AcquireSession(controller string, allowPreempt bool) (acqu
 	s.sessionSince = now
 	s.sessionUsed = now
 	s.transportState = "STOPPED"
+	s.clearTransportOnStop = true
 	s.volumeMapping = volumeMapping{}
 	return true, true
 }

@@ -120,7 +120,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				return
 			}
 			meta := XMLText(body, "CurrentURIMetaData")
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -140,7 +140,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Play":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -181,7 +181,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Pause":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -202,7 +202,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Stop":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -237,7 +237,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 				return
 			}
 
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -277,15 +277,15 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			relTime := "00:00:00"
 			absTime := "00:00:00"
 
-			// Try to get actual duration and position from active player
-			if p := st.GetActivePlayer(); p != nil {
-				if d, err := p.GetDuration(ctx); err == nil {
-					trackDur = durationToTime(d)
-				}
-				if pos, err := p.GetPosition(ctx); err == nil {
-					relTime = durationToTime(pos)
-					absTime = relTime
-				}
+			// Natural end-file events pin position at duration in PlayerState;
+			// otherwise this queries the active player as before.
+			pos, duration, posErr, durationErr := st.GetPlaybackPosition(ctx)
+			if durationErr == nil {
+				trackDur = durationToTime(duration)
+			}
+			if posErr == nil {
+				relTime = durationToTime(pos)
+				absTime = relTime
 			}
 
 			// 暂时清空 MetaData，排除格式问题
