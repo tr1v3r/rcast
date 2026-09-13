@@ -154,7 +154,7 @@ The player component integrates with IINA through multiple methods:
 
 ## Development Notes
 
-- The module targets Go 1.25.3.
+- The module targets Go 1.27.
 - Key dependencies: `fyne.io/systray` (menu bar), `github.com/tr1v3r/pkg/log`, `github.com/urfave/cli/v3`, and `github.com/google/uuid`.
 - Thread-safe state management uses `sync.RWMutex`; mutating local GUI and remote UPnP commands also share `PlayerState.Serialize` ordering.
 - macOS-specific GUI and system-volume features are isolated behind build-tagged files.

@@ -3,6 +3,7 @@ package upnp
 import (
 	"fmt"
 	"html"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -41,6 +42,12 @@ func timeToSeconds(t string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// NaN compares false against every bound below, so it would slip through
+	// the range check and poison the player IPC payload (audit M5, entry-side
+	// gate); ±Inf must be rejected for the same reason.
+	if math.IsNaN(s) || math.IsInf(s, 0) {
+		return 0, fmt.Errorf("invalid time value: %s", t)
+	}
 	if h < 0 || m < 0 || m >= 60 || s < 0 || s >= 60 {
 		return 0, fmt.Errorf("invalid time value: %s", t)
 	}
@@ -60,20 +67,27 @@ func timeToSeconds(t string) (float64, error) {
 // 	</item>
 // </DIDL-Lite>
 
+// errcSessionInUse is rcast's vendor-specific error for a session held by
+// another control point. The UPnP 700–799 numeric range is reserved for
+// standardized action errors, so custom codes must be >= 800 and carry an
+// ERRC_-prefixed description to stay distinguishable (audit LOW: error codes).
+const errcSessionInUse = 800
+
 // requireSession acquires (or, when preemption is enabled, preempts) the session
 // for a mutating transport action. On failure it records a UPnP error, writes a
-// SOAP 712 response, and returns false.
+// SOAP 800 ERRC_SESSION_IN_USE response, and returns false.
 func requireSession(w http.ResponseWriter, st *state.PlayerState, cfg config.Config, controller string) bool {
 	acquired, preempted := st.AcquireSession(controller, cfg.AllowSessionPreempt)
 	if !acquired {
 		monitoring.GetMetrics().RecordUPnPError()
-		WriteSOAPError(w, 712, "Session in use")
+		WriteSOAPError(w, errcSessionInUse, "ERRC_SESSION_IN_USE")
 		return false
 	}
 	if preempted {
 		if err := st.StopPlayer(); err != nil {
 			log.CtxError(st.Context(), "stop preempted player: %v", err)
 			monitoring.GetMetrics().RecordPlayerError()
+			monitoring.GetMetrics().RecordUPnPError()
 			WriteSOAPError(w, 501, "Action Failed")
 			return false
 		}
@@ -101,11 +115,12 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 		case "SetAVTransportURI":
 			uri := XMLText(body, "CurrentURI")
 			if uri == "" {
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
 			meta := XMLText(body, "CurrentURIMetaData")
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
@@ -114,6 +129,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 						log.CtxWarn(ctx, "stop current playback before URI change: %v", err)
 						if err := st.StopPlayer(); err != nil {
 							monitoring.GetMetrics().RecordPlayerError()
+							monitoring.GetMetrics().RecordUPnPError()
 							WriteSOAPError(w, 501, "Action Failed")
 							return
 						}
@@ -124,14 +140,14 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Play":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
 				uri, meta := st.GetURI()
 				if uri == "" {
 					monitoring.GetMetrics().RecordUPnPError()
-					WriteSOAPError(w, 714, "No content selected")
+					WriteSOAPError(w, 702, "No content selected")
 					return
 				}
 				st.SetTransportState("TRANSITIONING")
@@ -140,6 +156,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 					log.CtxError(ctx, "iina play error: %v", err)
 					monitoring.GetMetrics().RecordPlayerError()
 					st.SetTransportState("STOPPED")
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 501, "Action Failed")
 					return
 				}
@@ -154,6 +171,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 						monitoring.GetMetrics().RecordPlayerError()
 						_ = st.StopPlayer()
 						st.SetTransportState("STOPPED")
+						monitoring.GetMetrics().RecordUPnPError()
 						WriteSOAPError(w, 501, "Action Failed")
 						return
 					}
@@ -163,17 +181,19 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Pause":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
 				p := st.GetActivePlayer()
 				if p == nil {
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 701, "Transition not available")
 					return
 				}
 				if err := p.Pause(ctx); err != nil {
 					monitoring.GetMetrics().RecordPlayerError()
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 501, "Action Failed")
 					return
 				}
@@ -182,12 +202,13 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			})
 
 		case "Stop":
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
 				if err := st.StopPlayer(); err != nil {
 					monitoring.GetMetrics().RecordPlayerError()
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 501, "Action Failed")
 					return
 				}
@@ -203,6 +224,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			if unit != "REL_TIME" && unit != "ABS_TIME" {
 				// We mainly support REL_TIME/ABS_TIME which are time strings
 				// For now treat them same
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 710, "Seek mode not supported")
 				return
 			}
@@ -210,22 +232,25 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			seconds, err := timeToSeconds(target)
 			if err != nil {
 				log.CtxError(ctx, "parse seek target error: %v target=%s", err, target)
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 711, "Illegal seek target")
 				return
 			}
 
-			st.Serialize(func() {
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if !requireSession(w, st, cfg, controller) {
 					return
 				}
 				p := st.GetActivePlayer()
 				if p == nil {
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 701, "Transition not available")
 					return
 				}
 				if err := p.Seek(ctx, seconds); err != nil {
 					log.CtxError(ctx, "player seek error: %v", err)
 					monitoring.GetMetrics().RecordPlayerError()
+					monitoring.GetMetrics().RecordUPnPError()
 					WriteSOAPError(w, 501, "Action Failed")
 					return
 				}
@@ -240,23 +265,28 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "GetTransportInfoResponse", resp)
 
 		case "GetPositionInfo":
+			// Track numbering must stay consistent with NrTracks: a renderer
+			// with content loaded reports track 1, an empty one reports 0
+			// (audit LOW: Track=0 vs NrTracks=1 inconsistency).
+			uri, _ := st.GetURI()
 			track := "0"
+			if uri != "" {
+				track = "1"
+			}
 			trackDur := "00:00:00"
 			relTime := "00:00:00"
 			absTime := "00:00:00"
 
-			// Try to get actual duration and position from active player
-			if p := st.GetActivePlayer(); p != nil {
-				if d, err := p.GetDuration(ctx); err == nil {
-					trackDur = durationToTime(d)
-				}
-				if pos, err := p.GetPosition(ctx); err == nil {
-					relTime = durationToTime(pos)
-					absTime = relTime
-				}
+			// Natural end-file events pin position at duration in PlayerState;
+			// otherwise this queries the active player as before.
+			pos, duration, posErr, durationErr := st.GetPlaybackPosition(ctx)
+			if durationErr == nil {
+				trackDur = durationToTime(duration)
 			}
-
-			uri, _ := st.GetURI()
+			if posErr == nil {
+				relTime = durationToTime(pos)
+				absTime = relTime
+			}
 
 			// 暂时清空 MetaData，排除格式问题
 			// meta = ""
@@ -275,7 +305,12 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 
 		case "GetMediaInfo":
 			uri, meta := st.GetURI()
-			nrTracks := "1"
+			// NrTracks mirrors GetPositionInfo's Track: 0 with no URI set,
+			// 1 once content is loaded (audit LOW).
+			nrTracks := "0"
+			if uri != "" {
+				nrTracks = "1"
+			}
 			mediaDur := "00:00:00"
 			if p := st.GetActivePlayer(); p != nil {
 				if d, err := p.GetDuration(ctx); err == nil {
@@ -303,6 +338,7 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 			WriteSOAPResponse(w, AVTransportType, "GetDeviceCapabilitiesResponse", resp)
 
 		default:
+			monitoring.GetMetrics().RecordUPnPError()
 			WriteSOAPError(w, 401, "Invalid Action")
 		}
 	}

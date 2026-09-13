@@ -22,7 +22,10 @@ import (
 
 const ServerName = "RCast-DMR/1.1"
 
-const shutdownTimeout = 3 * time.Second
+const (
+	shutdownTimeout          = 3 * time.Second
+	defaultSSDPShutdownGrace = 2 * time.Second
+)
 
 // Dependencies contains the external collaborators used to start a Runtime.
 // Callers normally use Start or Run; this type exists so lifecycle tests can
@@ -31,9 +34,13 @@ type Dependencies struct {
 	UUIDLoader func(path string) (string, error)
 	ResolveIP  func() (string, error)
 	Listen     func(network, addr string) (net.Listener, error)
-	Announce   func(ctx context.Context, baseURL, deviceUUID, serverName string)
-	Search     func(ctx context.Context, baseURL, deviceUUID, serverName string)
+	Announce   func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
+	Search     func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
 	NewState   func(ctx context.Context, cfg config.Config) *state.PlayerState
+
+	// SSDPShutdownGrace bounds how long shutdown waits for the discovery loops
+	// to flush byebye messages. Zero selects the production default.
+	SSDPShutdownGrace time.Duration
 }
 
 // Runtime is a running RCast server. Its State is shared by the HTTP/UPnP
@@ -84,7 +91,8 @@ func StartWithDependencies(ctx context.Context, cfg config.Config, deps Dependen
 	}
 
 	ip := cfg.AdvertiseIP
-	if ip != "" {
+	pinnedAdvertiseIP := ip != ""
+	if pinnedAdvertiseIP {
 		parsed := net.ParseIP(ip)
 		if parsed == nil || parsed.To4() == nil {
 			return nil, fmt.Errorf("DMR_ADVERTISE_IP must be an IPv4 address: %q", ip)
@@ -110,6 +118,10 @@ func StartWithDependencies(ctx context.Context, cfg config.Config, deps Dependen
 		}
 	}
 	baseURL := fmt.Sprintf("http://%s:%d", ip, port)
+	location := ssdp.NewBaseURLSource(baseURL)
+	if pinnedAdvertiseIP {
+		location = ssdp.NewFixedBaseURL(baseURL)
+	}
 
 	st := deps.NewState(runCtx, cfg)
 	mux := httpserver.NewMux()
@@ -130,8 +142,16 @@ func StartWithDependencies(ctx context.Context, cfg config.Config, deps Dependen
 	}
 	cleanup = false
 
-	go deps.Announce(runCtx, baseURL, deviceUUID, ServerName)
-	go deps.Search(runCtx, baseURL, deviceUUID, ServerName)
+	var ssdpWG sync.WaitGroup
+	ssdpWG.Add(2)
+	go func() {
+		defer ssdpWG.Done()
+		deps.Announce(runCtx, location, deviceUUID, ServerName)
+	}()
+	go func() {
+		defer ssdpWG.Done()
+		deps.Search(runCtx, location, deviceUUID, ServerName)
+	}()
 
 	serveResult := make(chan error, 1)
 	go func() {
@@ -139,7 +159,11 @@ func StartWithDependencies(ctx context.Context, cfg config.Config, deps Dependen
 		serveResult <- srv.Serve(ln)
 	}()
 
-	go runtime.manage(runCtx, srv, serveResult)
+	ssdpGrace := deps.SSDPShutdownGrace
+	if ssdpGrace <= 0 {
+		ssdpGrace = defaultSSDPShutdownGrace
+	}
+	go runtime.manage(runCtx, srv, serveResult, &ssdpWG, ssdpGrace)
 	return runtime, nil
 }
 
@@ -171,7 +195,13 @@ func (r *Runtime) Wait() error {
 	return r.err
 }
 
-func (r *Runtime) manage(ctx context.Context, srv *http.Server, serveResult <-chan error) {
+func (r *Runtime) manage(
+	ctx context.Context,
+	srv *http.Server,
+	serveResult <-chan error,
+	ssdpWG *sync.WaitGroup,
+	ssdpGrace time.Duration,
+) {
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -187,6 +217,7 @@ func (r *Runtime) manage(ctx context.Context, srv *http.Server, serveResult <-ch
 		runErr = fmt.Errorf("shutting down HTTP server: %w", err)
 	}
 	cancel()
+	waitBounded(ssdpWG, ssdpGrace, "SSDP shutdown")
 	r.state.Stop()
 
 	r.mu.Lock()
@@ -198,12 +229,13 @@ func (r *Runtime) manage(ctx context.Context, srv *http.Server, serveResult <-ch
 
 func defaultDependencies() Dependencies {
 	return Dependencies{
-		UUIDLoader: uuid.LoadOrCreate,
-		ResolveIP:  netutil.FirstUsableIPv4,
-		Listen:     net.Listen,
-		Announce:   ssdp.Announce,
-		Search:     ssdp.SearchResponder,
-		NewState:   state.New,
+		UUIDLoader:        uuid.LoadOrCreate,
+		ResolveIP:         netutil.FirstUsableIPv4,
+		Listen:            net.Listen,
+		Announce:          ssdp.AnnounceTracking,
+		Search:            ssdp.SearchResponderTracking,
+		NewState:          state.New,
+		SSDPShutdownGrace: defaultSSDPShutdownGrace,
 	}
 }
 
@@ -223,5 +255,21 @@ func validateDependencies(deps Dependencies) error {
 		return errors.New("app: NewState dependency is nil")
 	default:
 		return nil
+	}
+}
+
+// waitBounded waits for wg up to grace, logging a warning if it never finishes.
+func waitBounded(wg *sync.WaitGroup, grace time.Duration, what string) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Warn("%s did not stop within %s; continuing shutdown", what, grace)
 	}
 }

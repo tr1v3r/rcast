@@ -72,6 +72,7 @@ The GUI is an optional front end over the same server runtime and player state u
 
 ### Platform requirements
 
+- Building from source requires Go 1.27, matching `go.mod`.
 - The native menu bar is supported on macOS with cgo enabled.
 - `make build-gui` explicitly builds with `CGO_ENABLED=1` and writes `output/bin/rcast-gui`.
 - A working macOS cgo toolchain (normally the Xcode Command Line Tools) is required.

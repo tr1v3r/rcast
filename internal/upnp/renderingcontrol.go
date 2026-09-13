@@ -9,6 +9,7 @@ import (
 	"github.com/tr1v3r/pkg/log"
 
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/monitoring"
 	"github.com/tr1v3r/rcast/internal/player"
 	"github.com/tr1v3r/rcast/internal/state"
 )
@@ -36,6 +37,9 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 		controller := ControllerID(r)
 		volumeScale := volumeScaleForUserAgent(r.UserAgent())
 
+		// Record UPnP action (audit LOW: RCS actions were missing metrics).
+		monitoring.GetMetrics().RecordUPnPAction()
+
 		log.CtxDebug(ctx, "get request header: %+v", r.Header)
 		log.CtxDebug(ctx, "get request body: %s", string(body))
 
@@ -44,6 +48,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			vStr := XMLText(body, "DesiredVolume")
 			v, err := strconv.Atoi(vStr)
 			if err != nil {
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
@@ -53,13 +58,15 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			if v > 100 {
 				v = 100
 			}
-			st.Serialize(func() {
-				if !requireSession(w, st, cfg, controller) {
-					return
-				}
+			// Volume is renderer-global in DLNA semantics and independent of
+			// the AVTransport session: a second control point adjusting volume
+			// must not preempt the session or stop playback (audit M1), so
+			// SetVolume deliberately skips requireSession.
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				appliedVolume := st.PreviewVolumeRequest(controller, v, volumeScale)
 				if p := st.GetActivePlayer(); p != nil {
 					if err := p.SetVolume(ctx, appliedVolume); err != nil {
+						monitoring.GetMetrics().RecordUPnPError()
 						WriteSOAPError(w, 501, "Action Failed")
 						log.CtxError(ctx, "iina set volume error: %v", err)
 						return
@@ -84,16 +91,17 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 		case "SetMute":
 			mStr := strings.ToLower(XMLText(body, "DesiredMute"))
 			if mStr != "0" && mStr != "1" && mStr != "false" && mStr != "true" {
+				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 402, "Invalid Args")
 				return
 			}
 			m := mStr == "1" || mStr == "true"
-			st.Serialize(func() {
-				if !requireSession(w, st, cfg, controller) {
-					return
-				}
+			// Mute shares the renderer-global, session-independent semantics
+			// of volume (audit M1): no requireSession here either.
+			serializeSOAP(st, w, func(w http.ResponseWriter) {
 				if p := st.GetActivePlayer(); p != nil {
 					if err := p.SetMute(ctx, m); err != nil {
+						monitoring.GetMetrics().RecordUPnPError()
 						WriteSOAPError(w, 501, "Action Failed")
 						return
 					}
@@ -116,6 +124,7 @@ func RenderingControlHandler(st *state.PlayerState, cfg config.Config) http.Hand
 			WriteSOAPResponse(w, RenderingType, "GetMuteResponse", fmt.Sprintf("<CurrentMute>%s</CurrentMute>", val))
 
 		default:
+			monitoring.GetMetrics().RecordUPnPError()
 			WriteSOAPError(w, 401, "Invalid Action")
 		}
 	}

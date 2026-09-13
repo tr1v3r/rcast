@@ -1,6 +1,6 @@
 module github.com/tr1v3r/rcast
 
-go 1.25.3
+go 1.27
 
 require (
 	fyne.io/systray v1.12.2

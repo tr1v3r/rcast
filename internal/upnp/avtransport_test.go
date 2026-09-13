@@ -3,6 +3,7 @@ package upnp
 import (
 	"context"
 	"errors"
+	"html"
 	"net/http"
 	"strings"
 	"testing"
@@ -104,9 +105,9 @@ func TestSetAVTransportURI_SessionHeldByOtherControllerPreemptDisabled(t *testin
 	if rec := serveAction(handler, "SetAVTransportURI", soapBody(`<CurrentURI>https://example.test/one.mp4</CurrentURI>`), "10.0.0.1:1"); rec.Code != http.StatusOK {
 		t.Fatalf("first SetURI status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// Second controller should be refused (712).
+	// Second controller should be refused with the vendor session code (800).
 	rec := serveAction(handler, "SetAVTransportURI", soapBody(`<CurrentURI>https://example.test/two.mp4</CurrentURI>`), "10.0.0.2:1")
-	assertUPnPError(t, rec, 712)
+	assertUPnPError(t, rec, 800)
 	if owner := st.GetSessionOwner(); owner != "10.0.0.1" {
 		t.Fatalf("owner=%q, want 10.0.0.1", owner)
 	}
@@ -174,7 +175,7 @@ func TestPlay_NoURI(t *testing.T) {
 	// Acquire the session without setting a URI.
 	serveAction(AVTransportHandler(st, config.Config{}), "SetAVTransportURI", soapBody(`<CurrentURI></CurrentURI>`), "10.0.0.1:1")
 	rec := serveAction(AVTransportHandler(st, config.Config{}), "Play", soapBody(`<Speed>1</Speed>`), "10.0.0.1:1")
-	assertUPnPError(t, rec, 714)
+	assertUPnPError(t, rec, 702)
 }
 
 func TestPlay_Success(t *testing.T) {
@@ -446,10 +447,10 @@ func TestGetPositionInfo_FormatsFromSpy(t *testing.T) {
 	defer cleanup()
 	handler := AVTransportHandler(st, config.Config{})
 	const remote = "10.0.0.1:1"
-	// Use a URI with a query string; escape the ampersand so the SOAP body
-	// remains valid XML while the stored URI keeps the raw form.
+	// Use a URI with a query string; escape it for XML so the SOAP body
+	// remains valid while the stored URI keeps the raw form.
 	const uri = "https://example.test/v.mp4?token=abc&x=1"
-	uriBody := soapBody(`<CurrentURI>https://example.test/v.mp4?token=abc&amp;x=1</CurrentURI>`)
+	uriBody := soapBody("<CurrentURI>" + html.EscapeString(uri) + "</CurrentURI>")
 	if rec := serveAction(handler, "SetAVTransportURI", uriBody, remote); rec.Code != http.StatusOK {
 		t.Fatalf("setup SetURI status=%d body=%s", rec.Code, rec.Body.String())
 	}

@@ -65,8 +65,8 @@ func defaultStartServer(live *settings) func(ctx context.Context, cfg config.Con
 			UUIDLoader: uuid.LoadOrCreate,
 			ResolveIP:  netutil.FirstUsableIPv4,
 			Listen:     net.Listen,
-			Announce:   ssdp.Announce,
-			Search:     ssdp.SearchResponder,
+			Announce:   ssdp.AnnounceTracking,
+			Search:     ssdp.SearchResponderTracking,
 			NewState: func(ctx context.Context, cfg config.Config) *state.PlayerState {
 				return state.NewWithPlayerFactory(ctx, cfg, func() player.Player {
 					return player.NewIINAPlayer(live.snapshot().IINAFullscreen)

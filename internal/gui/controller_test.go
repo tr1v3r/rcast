@@ -17,6 +17,7 @@ import (
 	"github.com/tr1v3r/rcast/internal/app"
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/player"
+	"github.com/tr1v3r/rcast/internal/ssdp"
 	"github.com/tr1v3r/rcast/internal/state"
 )
 
@@ -200,8 +201,8 @@ func (h *guiHarness) startServer(ctx context.Context, cfg config.Config) (*app.R
 		},
 		ResolveIP: func() (string, error) { return "127.0.0.1", nil },
 		Listen:    net.Listen,
-		Announce:  func(context.Context, string, string, string) {},
-		Search:    func(context.Context, string, string, string) {},
+		Announce:  func(context.Context, *ssdp.BaseURLSource, string, string) {},
+		Search:    func(context.Context, *ssdp.BaseURLSource, string, string) {},
 		NewState: func(ctx context.Context, cfg config.Config) *state.PlayerState {
 			return state.NewWithPlayerFactory(ctx, cfg, func() player.Player { return h.fp })
 		},

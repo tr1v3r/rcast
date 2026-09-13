@@ -6,7 +6,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/tr1v3r/pkg/log"
 	"github.com/urfave/cli/v3"
@@ -14,10 +16,15 @@ import (
 	"github.com/tr1v3r/rcast/internal/app"
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/gui"
+	"github.com/tr1v3r/rcast/internal/ssdp"
 	"github.com/tr1v3r/rcast/internal/state"
 )
 
 const serverName = app.ServerName
+
+// ssdpShutdownGrace bounds how long shutdown waits for the announce/search
+// loops to flush their ssdp:byebye messages before exiting anyway.
+var ssdpShutdownGrace = 2 * time.Second
 
 var (
 	version   = "dev"
@@ -36,7 +43,6 @@ func main() {
 	defer log.Close()
 
 	cfg := config.Load()
-
 	cmd := newRootCommand(cfg)
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
@@ -126,31 +132,82 @@ func runGUI(ctx context.Context, cmd *cli.Command, cfg config.Config, debug bool
 	})
 }
 
-// serverDeps preserves the main package's existing deterministic test seam.
-// Production wiring lives in internal/app.
+// serverDeps preserves the main package's deterministic test seam. Production
+// dependency wiring lives in internal/app.
 type serverDeps struct {
 	uuidLoader func(path string) (string, error)
 	resolveIP  func() (string, error)
 	listen     func(network, addr string) (net.Listener, error)
-	announce   func(ctx context.Context, baseURL, deviceUUID, serverName string)
-	search     func(ctx context.Context, baseURL, deviceUUID, serverName string)
+	announce   func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
+	search     func(ctx context.Context, loc *ssdp.BaseURLSource, deviceUUID, serverName string)
 }
 
 func runServer(ctx context.Context, cfg config.Config) error {
-	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
-	return app.Run(ctx, cfg)
+	return runServerRuntime(ctx, func(runCtx context.Context) (*app.Runtime, error) {
+		return app.Start(runCtx, cfg)
+	})
 }
 
-// runServerWithRuntime preserves the focused main package test seam while the
-// reusable lifecycle itself lives in internal/app.
 func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDeps) error {
-	return app.RunWithDependencies(ctx, cfg, app.Dependencies{
-		UUIDLoader: deps.uuidLoader,
-		ResolveIP:  deps.resolveIP,
-		Listen:     deps.listen,
-		Announce:   deps.announce,
-		Search:     deps.search,
-		NewState:   state.New,
+	return runServerRuntime(ctx, func(runCtx context.Context) (*app.Runtime, error) {
+		return app.StartWithDependencies(runCtx, cfg, app.Dependencies{
+			UUIDLoader:        deps.uuidLoader,
+			ResolveIP:         deps.resolveIP,
+			Listen:            deps.listen,
+			Announce:          deps.announce,
+			Search:            deps.search,
+			NewState:          state.New,
+			SSDPShutdownGrace: ssdpShutdownGrace,
+		})
 	})
+}
+
+// runServerRuntime owns headless-only signal semantics around the reusable app
+// runtime. The runtime itself deliberately installs no handlers so GUI signals
+// can flow through the native event loop.
+func runServerRuntime(ctx context.Context, start func(context.Context) (*app.Runtime, error)) error {
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	runtime, err := start(ctx)
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Wait() }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// NotifyContext consumes later signals. Once graceful shutdown starts,
+		// arm a fresh handler so a second signal can force an immediate exit.
+		disarmForceExit := armForceExit()
+		defer disarmForceExit()
+		return <-done
+	}
+}
+
+// armForceExit installs a signal handler that hard-exits the process when a
+// second SIGINT/SIGTERM arrives while shutdown is in flight. The returned
+// function disarms the handler once graceful shutdown completes.
+func armForceExit() (disarm func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigs:
+			log.Warn("signal %v during shutdown; forcing exit", sig)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			signal.Stop(sigs)
+		})
+	}
 }

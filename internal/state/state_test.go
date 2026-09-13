@@ -203,9 +203,9 @@ func TestStopPlayerErrorDoesNotDeadlock(t *testing.T) {
 	if fake.stops() != 1 {
 		t.Fatalf("Stop invoked %d times, want 1", fake.stops())
 	}
-	// Subsequent StopPlayer should now find no player.
-	if err := st.StopPlayer(); err != nil {
-		t.Fatalf("StopPlayer after stop = %v, want nil", err)
+	// A failed stop keeps the player reachable and retryable.
+	if got := st.GetActivePlayer(); got != fake {
+		t.Fatalf("player after failed stop = %v, want original", got)
 	}
 }
 
@@ -350,7 +350,7 @@ func TestMapVolumeRequestDirectionReversal(t *testing.T) {
 		t.Fatalf("up applied = %d, want 64", applied)
 	}
 	// Reverse back to raw 60 → applied 64 + (60-62)*2 = 60.
-	applied, mapping = mapVolumeRequest(64, mapping, "c", 60, scale)
+	applied, _ = mapVolumeRequest(64, mapping, "c", 60, scale)
 	if applied != 60 {
 		t.Fatalf("reversal applied = %d, want 60", applied)
 	}

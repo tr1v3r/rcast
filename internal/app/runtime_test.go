@@ -10,6 +10,7 @@ import (
 
 	"github.com/tr1v3r/rcast/internal/app"
 	"github.com/tr1v3r/rcast/internal/config"
+	"github.com/tr1v3r/rcast/internal/ssdp"
 	"github.com/tr1v3r/rcast/internal/state"
 )
 
@@ -40,11 +41,11 @@ func newRuntimeTestDeps() runtimeTestDeps {
 			UUIDLoader: func(string) (string, error) { return "test-uuid", nil },
 			ResolveIP:  func() (string, error) { return "127.0.0.1", nil },
 			Listen:     net.Listen,
-			Announce: func(_ context.Context, baseURL, deviceUUID, serverName string) {
-				announce <- discoveryCall{baseURL, deviceUUID, serverName}
+			Announce: func(_ context.Context, location *ssdp.BaseURLSource, deviceUUID, serverName string) {
+				announce <- discoveryCall{location.Get(), deviceUUID, serverName}
 			},
-			Search: func(_ context.Context, baseURL, deviceUUID, serverName string) {
-				search <- discoveryCall{baseURL, deviceUUID, serverName}
+			Search: func(_ context.Context, location *ssdp.BaseURLSource, deviceUUID, serverName string) {
+				search <- discoveryCall{location.Get(), deviceUUID, serverName}
 			},
 			NewState: func(ctx context.Context, cfg config.Config) *state.PlayerState {
 				st := state.New(ctx, cfg)

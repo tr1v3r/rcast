@@ -187,6 +187,54 @@ func TestConcurrentSubscribeUnsubscribeAndMutation(t *testing.T) {
 	}
 }
 
+func TestSubscriberObservesNaturalPlaybackEnd(t *testing.T) {
+	fake := &eventPlayer{duration: 95}
+	st := newState(t, func() player.Player { return fake })
+	st.SetURI("https://example.test/movie.mp4", "")
+	st.EnsurePlayer()
+	st.SetTransportState("PLAYING")
+
+	updates := make(chan Snapshot, 2)
+	unsubscribe := st.Subscribe(func(snapshot Snapshot) { updates <- snapshot })
+	defer unsubscribe()
+	if initial := receiveSnapshot(t, updates); initial.TransportState != "PLAYING" {
+		t.Fatalf("initial snapshot = %+v, want PLAYING", initial)
+	}
+
+	fake.emit(player.Event{Name: "end-file", Reason: "eof"})
+	if got := receiveSnapshot(t, updates); got.TransportState != "STOPPED" {
+		t.Fatalf("end-file snapshot = %+v, want STOPPED", got)
+	}
+}
+
+func TestSubscriberObservesPreemptedTransportClear(t *testing.T) {
+	fake := &fakePlayer{}
+	st := newState(t, func() player.Player { return fake })
+	st.AcquireSession("first", false)
+	st.SetURI("https://example.test/first.mp4", "<title>first</title>")
+	st.EnsurePlayer()
+	st.SetTransportState("PLAYING")
+
+	updates := make(chan Snapshot, 3)
+	unsubscribe := st.Subscribe(func(snapshot Snapshot) { updates <- snapshot })
+	defer unsubscribe()
+	_ = receiveSnapshot(t, updates)
+
+	acquired, preempted := st.AcquireSession("second", true)
+	if !acquired || !preempted {
+		t.Fatalf("AcquireSession = (%v, %v), want (true, true)", acquired, preempted)
+	}
+	if got := receiveSnapshot(t, updates); got.TransportState != "STOPPED" || got.SessionOwner != "second" {
+		t.Fatalf("preemption snapshot = %+v", got)
+	}
+	if err := st.StopPlayer(); err != nil {
+		t.Fatalf("StopPlayer: %v", err)
+	}
+	if got := receiveSnapshot(t, updates); got.TransportURI != "" || got.Title != "" {
+		t.Fatalf("cleared transport snapshot = %+v", got)
+	}
+}
+
 func receiveSnapshot(t *testing.T, updates <-chan Snapshot) Snapshot {
 	t.Helper()
 	select {
