@@ -23,6 +23,7 @@ BIN_DIR := $(OUTPUT_DIR)/bin
 LOG_DIR := $(OUTPUT_DIR)/log
 RELEASE_BIN := $(BIN_DIR)/$(BINARY_NAME)
 DEV_BIN := $(BIN_DIR)/$(BINARY_NAME)-dev
+GUI_BIN := $(BIN_DIR)/$(BINARY_NAME)-gui
 
 GO_LDFLAGS := -s -w \
 	-X main.version=$(VERSION) \
@@ -39,7 +40,7 @@ LINT_SOURCE := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(LINT_VER
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-dev build-all run run-dev \
+.PHONY: all build build-dev build-all build-gui run run-dev run-gui \
 	test race-test test-coverage coverage-check test-integration \
 	vet lint fmt format fmt-check format-check \
 	tidy tidy-check check dev ci tools fmt-tool-check lint-tool-check \
@@ -59,6 +60,14 @@ build-dev: $(DEV_BIN) ## Build the development binary with debug information
 
 build-all: build build-dev ## Build release and development binaries
 
+# The menu bar front end (fyne.io/systray) needs cgo; the framework linkage
+# (-framework Cocoa) is embedded in the library's own cgo directives, so no
+# extra flags are needed here. Building with CGO_ENABLED=0 still works for
+# headless use — internal/gui falls back to a stub and `rcast gui` reports
+# "GUI requires macOS with cgo enabled".
+build-gui: $(GUI_BIN) ## Build the binary with the menu bar GUI (cgo enabled)
+	@echo "GUI build completed: $(GUI_BIN)"
+
 $(RELEASE_BIN): FORCE | $(BIN_DIR) $(LOG_DIR)
 	@echo "Building $(BINARY_NAME) $(VERSION)..."
 	@GOWORK=$(GOWORK) $(GO) build $(GO_FLAGS) -ldflags "$(GO_LDFLAGS)" -o $@ $(MAIN_PACKAGE)
@@ -66,6 +75,10 @@ $(RELEASE_BIN): FORCE | $(BIN_DIR) $(LOG_DIR)
 $(DEV_BIN): FORCE | $(BIN_DIR) $(LOG_DIR)
 	@echo "Building development version of $(BINARY_NAME)..."
 	@GOWORK=$(GOWORK) $(GO) build $(GO_FLAGS) -o $@ $(MAIN_PACKAGE)
+
+$(GUI_BIN): FORCE | $(BIN_DIR) $(LOG_DIR)
+	@echo "Building $(BINARY_NAME) GUI $(VERSION) (CGO_ENABLED=1)..."
+	@GOWORK=$(GOWORK) CGO_ENABLED=1 $(GO) build $(GO_FLAGS) -ldflags "$(GO_LDFLAGS)" -o $@ $(MAIN_PACKAGE)
 
 $(BIN_DIR) $(LOG_DIR):
 	@mkdir -p $@
@@ -81,6 +94,9 @@ run: build ## Build and run the release binary
 
 run-dev: build-dev ## Build and run the development binary with debug logging
 	@$(DEV_BIN) --debug $(RUN_ARGS)
+
+run-gui: build-gui ## Build and run the menu bar app
+	@$(GUI_BIN) gui $(RUN_ARGS)
 
 # ==============================================================================
 # Tests and quality
