@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,19 +13,17 @@ import (
 	"github.com/tr1v3r/pkg/log"
 	"github.com/urfave/cli/v3"
 
+	"github.com/tr1v3r/rcast/internal/app"
 	"github.com/tr1v3r/rcast/internal/config"
-	"github.com/tr1v3r/rcast/internal/httpserver"
-	"github.com/tr1v3r/rcast/internal/netutil"
+	"github.com/tr1v3r/rcast/internal/gui"
 	"github.com/tr1v3r/rcast/internal/ssdp"
 	"github.com/tr1v3r/rcast/internal/state"
-	"github.com/tr1v3r/rcast/internal/uuid"
 )
 
-const serverName = "RCast-DMR/1.1" // "GoDLNA-DMR/1.1"
+const serverName = app.ServerName
 
 // ssdpShutdownGrace bounds how long shutdown waits for the announce/search
-// loops to flush their ssdp:byebye messages before exiting anyway (audit
-// LOW-8: a fast exit used to race the byebye flush and lose all 6 messages).
+// loops to flush their ssdp:byebye messages before exiting anyway.
 var ssdpShutdownGrace = 2 * time.Second
 
 var (
@@ -36,12 +33,31 @@ var (
 	goVersion = "unknown"
 )
 
+// guiRun is the seam over internal/gui.Run; tests replace it to exercise the
+// gui subcommand wiring without starting the real menu bar app.
+var guiRun = func(ctx context.Context, cfg config.Config, deps gui.Deps) error {
+	return gui.Run(ctx, cfg, deps)
+}
+
 func main() {
 	defer log.Close()
 
 	cfg := config.Load()
+	cmd := newRootCommand(cfg)
 
-	cmd := &cli.Command{
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		// tr1v3r/pkg/log's Fatal only logs; flush and exit explicitly so
+		// error paths (including `rcast gui` on stub builds) exit non-zero.
+		log.Fatal("run app failed: %v", err)
+		log.Close()
+		os.Exit(1)
+	}
+}
+
+// newRootCommand builds the rcast command tree: the default action runs the
+// headless server, and `rcast gui` runs the macOS menu bar front end.
+func newRootCommand(cfg config.Config) *cli.Command {
+	return &cli.Command{
 		Name:    "rcast",
 		Usage:   "RCast DMR",
 		Version: fmt.Sprintf("%s (commit %s, built %s, %s)", version, gitCommit, buildTime, goVersion),
@@ -57,6 +73,7 @@ func main() {
 				Value:   cfg.IINAFullscreen,
 			},
 		},
+		Commands: []*cli.Command{newGUICommand(cfg)},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if cmd.Bool("debug") {
 				log.SetLevel(log.DebugLevel)
@@ -66,15 +83,77 @@ func main() {
 			return runServer(ctx, cfg)
 		},
 	}
+}
 
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		log.Fatal("run app failed: %v", err)
+// newGUICommand builds the `rcast gui` subcommand. The same flags as the
+// root command are accepted on the subcommand (rcast gui --debug --fs) and
+// root-level spellings (rcast --debug gui) are honored through the root
+// lookup, mirroring headless semantics.
+func newGUICommand(cfg config.Config) *cli.Command {
+	return &cli.Command{
+		Name:  "gui",
+		Usage: "run as a macOS menu bar app (server + status menu)",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "debug",
+				Usage: "enable debug logging",
+			},
+			&cli.BoolFlag{
+				Name:    "fullscreen",
+				Aliases: []string{"fs"},
+				Usage:   "open iina in fullscreen",
+				Value:   cfg.IINAFullscreen,
+			},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			debug := cmd.Bool("debug") || cmd.Root().Bool("debug")
+			fullscreen := cmd.Bool("fullscreen") || cmd.Root().Bool("fullscreen")
+
+			if debug {
+				log.SetLevel(log.DebugLevel)
+			}
+			cfg.IINAFullscreen = fullscreen
+
+			return runGUI(ctx, cmd, cfg, debug)
+		},
 	}
 }
 
-// serverDeps bundles the external collaborators of runServer so they can be
-// replaced in tests. All fields are required; production wiring lives in
-// runServer.
+// runGUI drives the menu bar app. Signals cancel the context and the GUI
+// controller turns that into a graceful quit (server drain, then the native
+// loop exits); on stub builds (no cgo / non-darwin) gui.Run reports
+// gui.ErrUnsupported and main exits non-zero after logging it. While the
+// graceful quit is in flight, a second SIGINT/SIGTERM force-exits the
+// process, matching the headless semantics from #8. gui.Run stays on the
+// main goroutine (the systray event loop owns the main thread); the signal
+// watch runs beside it.
+func runGUI(ctx context.Context, cmd *cli.Command, cfg config.Config, debug bool) error {
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	guiDone := make(chan struct{})
+	go watchGUIForceExit(ctx, guiDone, armForceExit)
+
+	err := guiRun(ctx, cfg, gui.Deps{
+		Version:      version,
+		InitialDebug: debug,
+	})
+	close(guiDone)
+	return err
+}
+
+// watchGUIForceExit arms the force exit once the first signal starts the
+// graceful quit, and disarms it when guiRun has returned. The arm function
+// is injected so tests can observe the arm/disarm ordering without signals.
+func watchGUIForceExit(ctx context.Context, guiDone <-chan struct{}, arm func() (disarm func())) {
+	<-ctx.Done()
+	disarm := arm()
+	<-guiDone
+	disarm()
+}
+
+// serverDeps preserves the main package's deterministic test seam. Production
+// dependency wiring lives in internal/app.
 type serverDeps struct {
 	uuidLoader func(path string) (string, error)
 	resolveIP  func() (string, error)
@@ -84,130 +163,49 @@ type serverDeps struct {
 }
 
 func runServer(ctx context.Context, cfg config.Config) error {
-	return runServerWithRuntime(ctx, cfg, serverDeps{
-		uuidLoader: uuid.LoadOrCreate,
-		resolveIP:  netutil.FirstUsableIPv4,
-		listen:     net.Listen,
-		announce:   ssdp.AnnounceTracking,
-		search:     ssdp.SearchResponderTracking,
+	return runServerRuntime(ctx, func(runCtx context.Context) (*app.Runtime, error) {
+		return app.Start(runCtx, cfg)
 	})
 }
 
 func runServerWithRuntime(ctx context.Context, cfg config.Config, deps serverDeps) error {
+	return runServerRuntime(ctx, func(runCtx context.Context) (*app.Runtime, error) {
+		return app.StartWithDependencies(runCtx, cfg, app.Dependencies{
+			UUIDLoader:        deps.uuidLoader,
+			ResolveIP:         deps.resolveIP,
+			Listen:            deps.listen,
+			Announce:          deps.announce,
+			Search:            deps.search,
+			NewState:          state.New,
+			SSDPShutdownGrace: ssdpShutdownGrace,
+		})
+	})
+}
+
+// runServerRuntime owns headless-only signal semantics around the reusable app
+// runtime. The runtime itself deliberately installs no handlers so GUI signals
+// can flow through the native event loop.
+func runServerRuntime(ctx context.Context, start func(context.Context) (*app.Runtime, error)) error {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
-	// 设备 UUID
-	deviceUUID, err := deps.uuidLoader(cfg.UUIDPath)
+	runtime, err := start(ctx)
 	if err != nil {
-		return fmt.Errorf("load device UUID: %w", err)
+		return err
 	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Wait() }()
 
-	// 网卡 IP
-	ip := cfg.AdvertiseIP
-	pinned := ip != ""
-	if pinned {
-		parsed := net.ParseIP(ip)
-		if parsed == nil || parsed.To4() == nil {
-			return fmt.Errorf("DMR_ADVERTISE_IP must be an IPv4 address: %q", ip)
-		}
-		ip = parsed.To4().String()
-	} else {
-		ip, err = deps.resolveIP()
-		if err != nil {
-			log.Error("no IPv4: %v", err)
-			return err
-		}
-	}
-
-	// HTTP listener (created before baseURL so port 0 resolves to the real port)
-	ln, err := deps.listen("tcp", fmt.Sprintf(":%d", cfg.HTTPPort))
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-	port := cfg.HTTPPort
-	if port == 0 {
-		if a, ok := ln.Addr().(*net.TCPAddr); ok {
-			port = a.Port
-		}
-	}
-	baseURL := fmt.Sprintf("http://%s:%d", ip, port)
-
-	// 状态
-	st := state.New(ctx, cfg)
-	defer st.Stop()
-
-	// HTTP
-	mux := httpserver.NewMux()
-	httpserver.RegisterHTTP(mux, baseURL, deviceUUID, st, cfg)
-	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler:           httpserver.LogMiddleware(mux),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	// SSDP：动态选网时 base URL 通过共享 source 跟随主机 IP 变化（审计
-	// M7：网络切换后 LOCATION 不再陈旧）；固定 DMR_ADVERTISE_IP 时锁定不变。
-	loc := ssdp.NewFixedBaseURL(baseURL)
-	if !pinned {
-		loc = ssdp.NewBaseURLSource(baseURL)
-	}
-
-	// Announce/search goroutines are tracked so shutdown waits for the
-	// ssdp:byebye flush instead of racing process exit (audit LOW-8).
-	var ssdpWG sync.WaitGroup
-	ssdpWG.Add(2)
-	go func() {
-		defer ssdpWG.Done()
-		deps.announce(ctx, loc, deviceUUID, serverName)
-	}()
-	go func() {
-		defer ssdpWG.Done()
-		deps.search(ctx, loc, deviceUUID, serverName)
-	}()
-
-	// 启动 HTTP
-	serverErr := make(chan error, 1)
-	go func() {
-		log.Info("HTTP listening on %s", srv.Addr)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			serverErr <- err
-		}
-	}()
-
-	// 优雅退出
-	var runErr error
 	select {
+	case err := <-done:
+		return err
 	case <-ctx.Done():
-	case err := <-serverErr:
-		runErr = fmt.Errorf("HTTP server: %w", err)
+		// NotifyContext consumes later signals. Once graceful shutdown starts,
+		// arm a fresh handler so a second signal can force an immediate exit.
+		disarmForceExit := armForceExit()
+		defer disarmForceExit()
+		return <-done
 	}
-
-	// Once shutdown begins, a second SIGINT/SIGTERM must terminate the
-	// process immediately; NotifyContext swallows extra signals after the
-	// first one, leaving no way to abort a slow shutdown.
-	disarmForceExit := armForceExit()
-	defer disarmForceExit()
-
-	cancel()
-	ctxShutdown, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel2()
-	if err := srv.Shutdown(ctxShutdown); err != nil && runErr == nil {
-		runErr = fmt.Errorf("shutting down HTTP server: %w", err)
-	}
-
-	// Give the SSDP loops a bounded window to flush their byebye messages
-	// (audit LOW-8: a fast exit used to drop all six).
-	waitBounded(&ssdpWG, ssdpShutdownGrace, "SSDP loops")
-
-	log.Info("bye")
-
-	return runErr
 }
 
 // armForceExit installs a signal handler that hard-exits the process when a
@@ -231,22 +229,5 @@ func armForceExit() (disarm func()) {
 			close(done)
 			signal.Stop(sigs)
 		})
-	}
-}
-
-// waitBounded waits for wg up to grace, logging a warning if it never
-// finishes.
-func waitBounded(wg *sync.WaitGroup, grace time.Duration, what string) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		log.Warn("%s did not stop within %s; continuing shutdown", what, grace)
 	}
 }

@@ -7,29 +7,40 @@ import (
 )
 
 const (
-	DefaultPort     = 8200
-	DefaultUUIDPath = ".local/rcast/dmr_uuid.txt"
+	DefaultPort         = 8200
+	DefaultUUIDPath     = ".local/rcast/dmr_uuid.txt"
+	DefaultSettingsPath = ".local/rcast/settings.json"
 )
 
 type Config struct {
 	UUIDPath               string
+	SettingsPath           string
 	AllowSessionPreempt    bool
 	LinkSystemOutputVolume bool
 	HTTPPort               int
 	AdvertiseIP            string
 	IINAFullscreen         bool
+	DebugLog               bool
 }
 
 func Load() Config {
 	home, _ := os.UserHomeDir()
+	settingsPath := envVar("DMR_SETTINGS_PATH", filepath.Join(home, DefaultSettingsPath))
 	cfg := Config{
-		UUIDPath:               envVar("DMR_UUID_PATH", filepath.Join(home, DefaultUUIDPath)),
-		AllowSessionPreempt:    envVar("DMR_ALLOW_PREEMPT", true),
-		LinkSystemOutputVolume: envVar("DMR_LINK_SYSTEM_VOLUME", false),
-		HTTPPort:               envVar("DMR_HTTP_PORT", DefaultPort),
-		AdvertiseIP:            envVar("DMR_ADVERTISE_IP", ""),
-		IINAFullscreen:         envVar("DMR_IINA_FULLSCREEN", false),
+		UUIDPath:            envVar("DMR_UUID_PATH", filepath.Join(home, DefaultUUIDPath)),
+		SettingsPath:        settingsPath,
+		AllowSessionPreempt: true,
+		HTTPPort:            envVar("DMR_HTTP_PORT", DefaultPort),
+		AdvertiseIP:         envVar("DMR_ADVERTISE_IP", ""),
 	}
+
+	applyPersisted(&cfg, loadPersisted(settingsPath))
+
+	// Environment variables remain the highest-priority configuration layer.
+	cfg.AllowSessionPreempt = envVar("DMR_ALLOW_PREEMPT", cfg.AllowSessionPreempt)
+	cfg.LinkSystemOutputVolume = envVar("DMR_LINK_SYSTEM_VOLUME", cfg.LinkSystemOutputVolume)
+	cfg.IINAFullscreen = envVar("DMR_IINA_FULLSCREEN", cfg.IINAFullscreen)
+	cfg.DebugLog = envVar("DMR_DEBUG_LOG", cfg.DebugLog)
 
 	// Validate configuration
 	cfg.validate()

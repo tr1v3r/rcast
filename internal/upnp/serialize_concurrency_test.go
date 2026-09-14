@@ -28,7 +28,9 @@ func newBlockingResponseWriter() *blockingResponseWriter {
 }
 
 func (w *blockingResponseWriter) Header() http.Header { return w.header }
-func (w *blockingResponseWriter) WriteHeader(int)     {}
+
+func (w *blockingResponseWriter) WriteHeader(int) {}
+
 func (w *blockingResponseWriter) Write(body []byte) (int, error) {
 	w.once.Do(func() { close(w.started) })
 	<-w.release
