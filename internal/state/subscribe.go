@@ -19,6 +19,11 @@ type Snapshot struct {
 	TransportURI   string
 }
 
+// subscriptionQueueCapacity is deliberately one: snapshots describe the
+// complete current state, so while a subscriber is busy only the newest pending
+// value has any meaning. This bounds memory independently of producer rate.
+const subscriptionQueueCapacity = 1
+
 type subscription struct {
 	callback func(Snapshot)
 
@@ -26,6 +31,7 @@ type subscription struct {
 	ready   *sync.Cond
 	queue   []Snapshot
 	stopped bool
+	done    chan struct{}
 }
 
 // Snapshot returns a consistent view of the current player state.
@@ -37,13 +43,18 @@ func (s *PlayerState) Snapshot() Snapshot {
 
 // Subscribe registers callback for state snapshots. The initial snapshot and
 // later changes are delivered asynchronously and serially for this subscriber.
-// The returned function is safe to call more than once to unsubscribe.
+// While callback is busy, pending changes are coalesced to the newest complete
+// snapshot. The returned function is safe to call more than once to unsubscribe.
 func (s *PlayerState) Subscribe(callback func(Snapshot)) func() {
 	if callback == nil {
 		return func() {}
 	}
 
-	sub := &subscription{callback: callback}
+	sub := &subscription{
+		callback: callback,
+		queue:    make([]Snapshot, 0, subscriptionQueueCapacity),
+		done:     make(chan struct{}),
+	}
 	sub.ready = sync.NewCond(&sub.mu)
 
 	s.mu.Lock()
@@ -96,6 +107,7 @@ func notify(snapshot Snapshot, subscribers []*subscription) {
 }
 
 func (s *subscription) run(initial Snapshot) {
+	defer close(s.done)
 	s.callback(initial)
 	for {
 		s.mu.Lock()
@@ -114,12 +126,17 @@ func (s *subscription) run(initial Snapshot) {
 	}
 }
 
-// enqueue is non-blocking with respect to callback execution. The subscriber's
-// worker drains the queue serially, preserving the order of state mutations.
+// enqueue never waits for callback execution or queue capacity. The pending
+// slot is coalesced to the newest complete snapshot while the subscriber is
+// busy, so a slow UI remains eventually consistent without unbounded growth.
 func (s *subscription) enqueue(snapshot Snapshot) {
 	s.mu.Lock()
 	if !s.stopped {
-		s.queue = append(s.queue, snapshot)
+		if len(s.queue) == subscriptionQueueCapacity {
+			s.queue[len(s.queue)-1] = snapshot
+		} else {
+			s.queue = append(s.queue, snapshot)
+		}
 		s.ready.Signal()
 	}
 	s.mu.Unlock()

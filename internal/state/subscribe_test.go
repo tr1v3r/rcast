@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,22 +90,164 @@ func TestSubscribeReceivesInitialAndChangedSnapshots(t *testing.T) {
 	}
 }
 
-func TestSubscriberSeriallyDeliversEveryChange(t *testing.T) {
+func TestSubscriberSeriallyDeliversChangesWhileKeepingUp(t *testing.T) {
 	st := newSubscriptionTestState(t)
-	updates := make(chan int, 33)
+	updates := make(chan int, 1)
 	unsubscribe := st.Subscribe(func(snapshot Snapshot) { updates <- snapshot.Volume })
 	defer unsubscribe()
 	if initial := receiveVolume(t, updates); initial != 50 {
 		t.Fatalf("initial volume = %d, want 50", initial)
 	}
 
-	for volume := range 32 {
-		st.SetVolume(volume)
-	}
 	for want := range 32 {
+		st.SetVolume(want)
 		if got := receiveVolume(t, updates); got != want {
 			t.Fatalf("volume notification = %d, want %d", got, want)
 		}
+	}
+}
+
+func TestSubscriptionQueueCoalescesLatestWhenFull(t *testing.T) {
+	sub := &subscription{
+		queue: make([]Snapshot, 0, subscriptionQueueCapacity),
+		done:  make(chan struct{}),
+	}
+	sub.ready = sync.NewCond(&sub.mu)
+
+	for volume := range subscriptionQueueCapacity + 10 {
+		sub.enqueue(Snapshot{Volume: volume})
+	}
+
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if len(sub.queue) != subscriptionQueueCapacity || cap(sub.queue) > subscriptionQueueCapacity {
+		t.Fatalf("pending queue len/cap = %d/%d, want bounded by %d", len(sub.queue), cap(sub.queue), subscriptionQueueCapacity)
+	}
+	if got, want := sub.queue[len(sub.queue)-1].Volume, subscriptionQueueCapacity+9; got != want {
+		t.Fatalf("coalesced volume = %d, want newest %d", got, want)
+	}
+}
+
+func TestSlowSubscriberDoesNotBlockProducersAndReceivesLatest(t *testing.T) {
+	st := newSubscriptionTestState(t)
+	callbackStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	delivered := make(chan Snapshot, 2)
+
+	unsubscribe := st.Subscribe(func(snapshot Snapshot) {
+		select {
+		case callbackStarted <- struct{}{}:
+		default:
+		}
+		<-release
+		delivered <- snapshot
+	})
+	defer func() {
+		unblock()
+		unsubscribe()
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(subscriptionTestTimeout):
+		t.Fatal("initial callback did not start")
+	}
+
+	sub := soleSubscription(t, st)
+	const updates = 1024
+	producerDone := make(chan struct{})
+	go func() {
+		for volume := 1; volume <= updates; volume++ {
+			st.SetVolume(volume)
+		}
+		close(producerDone)
+	}()
+	select {
+	case <-producerDone:
+	case <-time.After(subscriptionTestTimeout):
+		t.Fatal("state producer blocked behind slow subscriber")
+	}
+
+	sub.mu.Lock()
+	queueLen, queueCap := len(sub.queue), cap(sub.queue)
+	var latest Snapshot
+	if queueLen > 0 {
+		latest = sub.queue[queueLen-1]
+	}
+	sub.mu.Unlock()
+	if queueLen != 1 || queueCap > subscriptionQueueCapacity {
+		t.Fatalf("slow-subscriber queue len/cap = %d/%d, want 1/<=%d", queueLen, queueCap, subscriptionQueueCapacity)
+	}
+	if latest.Volume != updates {
+		t.Fatalf("pending snapshot volume = %d, want latest %d", latest.Volume, updates)
+	}
+
+	unblock()
+	if initial := receiveSnapshot(t, delivered); initial.Volume != 50 {
+		t.Fatalf("initial snapshot volume = %d, want 50", initial.Volume)
+	}
+	if got := receiveSnapshot(t, delivered); got.Volume != updates {
+		t.Fatalf("coalesced snapshot volume = %d, want latest %d", got.Volume, updates)
+	}
+}
+
+func TestUnsubscribeClearsQueueAndWorkerExits(t *testing.T) {
+	st := newSubscriptionTestState(t)
+	callbackStarted := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	var callbackCount atomic.Int32
+
+	unsubscribe := st.Subscribe(func(Snapshot) {
+		if callbackCount.Add(1) == 1 {
+			close(callbackStarted)
+			<-release
+		}
+	})
+	defer func() {
+		unblock()
+		unsubscribe()
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(subscriptionTestTimeout):
+		t.Fatal("initial callback did not start")
+	}
+
+	sub := soleSubscription(t, st)
+	st.SetVolume(1)
+	st.SetVolume(2)
+
+	cancelReturned := make(chan struct{})
+	go func() {
+		unsubscribe()
+		unsubscribe()
+		close(cancelReturned)
+	}()
+	select {
+	case <-cancelReturned:
+	case <-time.After(subscriptionTestTimeout):
+		t.Fatal("unsubscribe blocked on active callback")
+	}
+
+	sub.mu.Lock()
+	stopped, pending := sub.stopped, len(sub.queue)
+	sub.mu.Unlock()
+	if !stopped || pending != 0 {
+		t.Fatalf("subscription after cancel: stopped=%v pending=%d, want true/0", stopped, pending)
+	}
+
+	unblock()
+	select {
+	case <-sub.done:
+	case <-time.After(subscriptionTestTimeout):
+		t.Fatal("subscription worker did not exit after callback returned")
+	}
+	st.SetVolume(99)
+	if got := callbackCount.Load(); got != 1 {
+		t.Fatalf("callback count after unsubscribe = %d, want 1", got)
 	}
 }
 
@@ -233,6 +376,19 @@ func TestSubscriberObservesPreemptedTransportClear(t *testing.T) {
 	if got := receiveSnapshot(t, updates); got.TransportURI != "" || got.Title != "" {
 		t.Fatalf("cleared transport snapshot = %+v", got)
 	}
+}
+
+func soleSubscription(t *testing.T, st *PlayerState) *subscription {
+	t.Helper()
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	if len(st.subscribers) != 1 {
+		t.Fatalf("subscriber count = %d, want 1", len(st.subscribers))
+	}
+	for _, sub := range st.subscribers {
+		return sub
+	}
+	return nil
 }
 
 func receiveSnapshot(t *testing.T, updates <-chan Snapshot) Snapshot {
