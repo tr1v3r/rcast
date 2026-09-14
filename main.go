@@ -122,14 +122,34 @@ func newGUICommand(cfg config.Config) *cli.Command {
 // runGUI drives the menu bar app. Signals cancel the context and the GUI
 // controller turns that into a graceful quit (server drain, then the native
 // loop exits); on stub builds (no cgo / non-darwin) gui.Run reports
-// gui.ErrUnsupported and main exits non-zero after logging it.
+// gui.ErrUnsupported and main exits non-zero after logging it. While the
+// graceful quit is in flight, a second SIGINT/SIGTERM force-exits the
+// process, matching the headless semantics from #8. gui.Run stays on the
+// main goroutine (the systray event loop owns the main thread); the signal
+// watch runs beside it.
 func runGUI(ctx context.Context, cmd *cli.Command, cfg config.Config, debug bool) error {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
-	return guiRun(ctx, cfg, gui.Deps{
+
+	guiDone := make(chan struct{})
+	go watchGUIForceExit(ctx, guiDone, armForceExit)
+
+	err := guiRun(ctx, cfg, gui.Deps{
 		Version:      version,
 		InitialDebug: debug,
 	})
+	close(guiDone)
+	return err
+}
+
+// watchGUIForceExit arms the force exit once the first signal starts the
+// graceful quit, and disarms it when guiRun has returned. The arm function
+// is injected so tests can observe the arm/disarm ordering without signals.
+func watchGUIForceExit(ctx context.Context, guiDone <-chan struct{}, arm func() (disarm func())) {
+	<-ctx.Done()
+	disarm := arm()
+	<-guiDone
+	disarm()
 }
 
 // serverDeps preserves the main package's deterministic test seam. Production

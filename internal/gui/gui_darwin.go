@@ -47,9 +47,6 @@ func Run(ctx context.Context, cfg config.Config, deps Deps) error {
 
 // withDarwinDefaults fills the production collaborators the caller omitted.
 func withDarwinDefaults(deps Deps) Deps {
-	if deps.SetSystemVolume == nil {
-		deps.SetSystemVolume = player.SetSystemOutputVolume
-	}
 	if deps.SetSystemMute == nil {
 		deps.SetSystemMute = player.SetSystemMute
 	}

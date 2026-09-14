@@ -32,11 +32,10 @@ type Deps struct {
 	// the settings.json selected by the base config (internal/config).
 	SaveSettings func(Settings) error
 
-	// SetSystemVolume and SetSystemMute mirror the system output sinks used
-	// by the RenderingControl handler when Link System Volume is enabled.
-	// They default to the internal/player implementations on darwin.
-	SetSystemVolume func(v int) error
-	SetSystemMute   func(m bool) error
+	// SetSystemMute mirrors the system output sink used by the
+	// RenderingControl handler when Link System Volume is enabled. It
+	// defaults to the internal/player implementation on darwin.
+	SetSystemMute func(m bool) error
 
 	// SetLogLevel applies the Debug Logging toggle. It defaults to
 	// log.SetLevel; injectable because the upstream handler reads the level
@@ -271,7 +270,12 @@ func (c *controller) doAction(a Action) {
 				}
 				if st.GetMute() {
 					if err := p.SetMute(ctx, true); err != nil {
+						// Mirror the UPnP Play action: a player that cannot be
+						// muted is torn down and the transport returns to
+						// STOPPED so the menu does not linger on Loading.
 						c.playerError("apply mute", err)
+						_ = st.StopPlayer()
+						st.SetTransportState("STOPPED")
 						return
 					}
 				}
@@ -379,31 +383,57 @@ func (c *controller) scheduleRestart() {
 }
 
 // restartServer replaces the runtime so handler-captured settings refresh.
-// It refuses to run mid-playback; the pending restart retries when the next
-// STOPPED snapshot arrives.
+// The claim (pendingRestart -> restarting) is one atomic mutex section, so
+// concurrent triggers cannot interleave teardown and start. After each
+// restart it re-checks pendingRestart: a toggle that armed while the
+// restart was in flight no longer has a fresh initial snapshot to ride, so
+// this loop is what guarantees it is not missed. It refuses to run
+// mid-playback; the pending restart then retries when the next STOPPED
+// snapshot arrives.
 func (c *controller) restartServer() {
-	c.mu.Lock()
-	if c.restarting || !c.pendingRestart {
+	for {
+		c.mu.Lock()
+		if c.restarting || !c.pendingRestart {
+			c.mu.Unlock()
+			return
+		}
+		c.restarting = true
+		c.pendingRestart = false
+		rt := c.rt
+		stopSub := c.stopSub
 		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
 
-	if !c.liveIdle() {
-		return
-	}
+		if !c.runOneRestart(rt, stopSub) {
+			c.mu.Lock()
+			c.restarting = false
+			c.mu.Unlock()
+			return // fatal path already requested quit
+		}
 
-	c.mu.Lock()
-	c.restarting = true
-	rt := c.rt
-	stopSub := c.stopSub
-	c.mu.Unlock()
-
-	defer func() {
 		c.mu.Lock()
 		c.restarting = false
+		rearmed := c.pendingRestart
 		c.mu.Unlock()
-	}()
+		if !rearmed {
+			log.CtxInfo(c.ctx, "gui: server restarted with updated settings")
+			return
+		}
+		// Re-armed while restarting: apply the newer settings immediately.
+	}
+}
+
+// runOneRestart performs one teardown/start cycle for an already-claimed
+// restart. It reports false when the restart failed fatally and the app is
+// quitting.
+func (c *controller) runOneRestart(rt *app.Runtime, stopSub func()) bool {
+	if !c.liveIdle() {
+		// Playback started between the caller's idle check and the claim;
+		// re-arm and wait for the transport to stop again.
+		c.mu.Lock()
+		c.pendingRestart = true
+		c.mu.Unlock()
+		return true
+	}
 
 	if stopSub != nil {
 		stopSub()
@@ -421,13 +451,10 @@ func (c *controller) restartServer() {
 		if err := c.startServer(); err != nil {
 			c.setFatal(fmt.Errorf("restart server: %w", err))
 			c.requestQuit()
-			return
+			return false
 		}
 	}
-	c.mu.Lock()
-	c.pendingRestart = false
-	c.mu.Unlock()
-	log.CtxInfo(c.ctx, "gui: server restarted with updated settings")
+	return true
 }
 
 func (c *controller) setFatal(err error) {
@@ -447,12 +474,21 @@ func (c *controller) playerError(what string, err error) {
 // requestQuit stops the native loop exactly once; final cleanup happens in
 // shutdown after the platform loop has returned. It waits for the native
 // view first: [NSApp stop:] posted before the event loop starts would be
-// lost and Run would hang.
+// lost and Run would hang. The state subscription is cancelled before the
+// loop is stopped so an in-flight render cannot call into Cocoa after the
+// native event loop has exited.
 func (c *controller) requestQuit() {
 	c.quitOnce.Do(func() {
 		select {
 		case <-c.viewReady:
 		case <-time.After(10 * time.Second):
+		}
+		c.mu.Lock()
+		stopSub := c.stopSub
+		c.stopSub = nil
+		c.mu.Unlock()
+		if stopSub != nil {
+			stopSub()
 		}
 		c.view.quit()
 	})

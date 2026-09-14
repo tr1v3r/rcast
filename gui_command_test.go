@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -183,4 +184,57 @@ func TestGUIUnsupportedOnStubBuilds(t *testing.T) {
 	if !errors.Is(err, gui.ErrUnsupported) {
 		t.Fatalf("err = %v, want ErrUnsupported passed through for log.Fatal", err)
 	}
+}
+
+// TestWatchGUIForceExitArmsAfterFirstSignal pins F6: the force exit is
+// armed once the first signal starts the graceful quit and disarmed when
+// the GUI has finished, without touching real signals.
+func TestWatchGUIForceExitArmsAfterFirstSignal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	guiDone := make(chan struct{})
+
+	events := make(chan string, 4)
+	arm := func() func() {
+		events <- "arm"
+		return func() { events <- "disarm" }
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchGUIForceExit(ctx, guiDone, arm)
+	}()
+
+	select {
+	case <-events:
+		t.Fatal("armed before the first signal")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case ev := <-events:
+		if ev != "arm" {
+			t.Fatalf("event after cancel = %q, want arm", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("not armed after the first signal")
+	}
+
+	select {
+	case ev := <-events:
+		t.Fatalf("disarmed before guiRun returned: %q", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(guiDone)
+	select {
+	case ev := <-events:
+		if ev != "disarm" {
+			t.Fatalf("event after guiDone = %q, want disarm", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("not disarmed after the GUI returned")
+	}
+	<-done
 }

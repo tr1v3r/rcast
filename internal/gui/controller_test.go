@@ -2,6 +2,7 @@ package gui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -23,10 +24,11 @@ import (
 
 // fakePlayer records command calls; it never touches IINA.
 type fakePlayer struct {
-	mu      sync.Mutex
-	calls   []string
-	lastURI string
-	lastVol int
+	mu       sync.Mutex
+	calls    []string
+	lastURI  string
+	lastVol  int
+	failMute bool
 }
 
 func (f *fakePlayer) record(format string, args ...any) {
@@ -63,6 +65,13 @@ func (f *fakePlayer) SetVolume(_ context.Context, v int) error {
 }
 
 func (f *fakePlayer) SetMute(_ context.Context, m bool) error {
+	f.mu.Lock()
+	fail := f.failMute
+	f.mu.Unlock()
+	if fail {
+		f.record("set-mute-failed %v", m)
+		return errors.New("mute refused")
+	}
 	f.record("set-mute %v", m)
 	return nil
 }
@@ -89,9 +98,20 @@ func (f *fakePlayer) GetDuration(context.Context) (float64, error) { return 0, n
 
 // recordingView captures renders and quit calls for assertions.
 type recordingView struct {
-	mu     sync.Mutex
-	models []Model
-	quits  int
+	mu       sync.Mutex
+	models   []Model
+	quits    int
+	onQuitMu sync.Mutex
+	onQuit   func()
+}
+
+// setOnQuit installs a hook invoked inside quit(); it may be set after the
+// controller is running (unlike the view reference itself, which is
+// immutable once handed to the controller).
+func (v *recordingView) setOnQuit(fn func()) {
+	v.onQuitMu.Lock()
+	v.onQuit = fn
+	v.onQuitMu.Unlock()
 }
 
 func (v *recordingView) render(m Model) {
@@ -101,6 +121,12 @@ func (v *recordingView) render(m Model) {
 }
 
 func (v *recordingView) quit() {
+	v.onQuitMu.Lock()
+	hook := v.onQuit
+	v.onQuitMu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.quits++
@@ -462,5 +488,139 @@ func TestControllerDefaultSaveSettingsPersists(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("settings.json missing %s: %s", want, data)
 		}
+	}
+}
+
+func TestControllerPlayMuteFailureMirrorsUPnPSemantics(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+	st := h.state()
+
+	// Mute state on and a player that refuses to mute: the GUI Play path
+	// must mirror the UPnP Play action (tear the player down, transport
+	// back to STOPPED) instead of lingering on TRANSITIONING.
+	h.fp.mu.Lock()
+	h.fp.failMute = true
+	h.fp.mu.Unlock()
+	st.SetURI("http://example.com/movie.mp4", "")
+	st.SetMute(true)
+
+	h.ctl.doAction(ActionPlayPause)
+
+	eventually(t, "STOPPED after mute failure", func() bool {
+		return st.GetTransportState() == "STOPPED"
+	})
+	foundTeardown := false
+	for _, call := range h.fp.recorded() {
+		if call == "stop" {
+			foundTeardown = true
+		}
+	}
+	if !foundTeardown {
+		t.Errorf("player not torn down after mute failure: %v", h.fp.recorded())
+	}
+	eventually(t, "menu leaves Loading", func() bool {
+		m := h.view.last()
+		return m.Transport == "Idle" && !m.CanStop
+	})
+}
+
+func TestConcurrentRestartTriggersNoDoubleOrMissed(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+
+	// Hammer the restart path from many goroutines while idle: the atomic
+	// claim must prevent interleaved teardowns, and the settings must end
+	// applied (pendingRestart drained).
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.ctl.scheduleRestart()
+		}()
+	}
+	wg.Wait()
+
+	eventually(t, "at least one restart", func() bool { return h.starts.Load() > 1 })
+
+	// Terminal condition: the restart state drains, and no further starts
+	// happen for a quiet window afterwards (a follow-up restart can only be
+	// armed through pendingRestart, which is false by then). Restarts
+	// include an SSDP drain window, so the budget is generous.
+	drainDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(drainDeadline) {
+		h.ctl.mu.Lock()
+		drained := !h.ctl.pendingRestart && !h.ctl.restarting
+		h.ctl.mu.Unlock()
+		if drained {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	h.ctl.mu.Lock()
+	pending, restarting := h.ctl.pendingRestart, h.ctl.restarting
+	h.ctl.mu.Unlock()
+	if pending || restarting {
+		t.Fatalf("restart state not drained after 15s: pending=%v restarting=%v starts=%d", pending, restarting, h.starts.Load())
+	}
+	stableSince := time.Now()
+	last := h.starts.Load()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		if now := h.starts.Load(); now != last {
+			last = now
+			stableSince = time.Now()
+			continue
+		}
+		if time.Since(stableSince) >= 500*time.Millisecond {
+			break
+		}
+	}
+	if time.Since(stableSince) < 500*time.Millisecond {
+		t.Fatalf("restarts never quiesced (starts=%d)", h.starts.Load())
+	}
+	if n := h.starts.Load(); n > 11 {
+		t.Errorf("restart storm: starts=%d", n)
+	}
+	h.ctl.mu.Lock()
+	rt := h.ctl.rt
+	h.ctl.mu.Unlock()
+	if rt == nil || rt.State() == nil {
+		t.Fatal("runtime missing after concurrent restarts")
+	}
+}
+
+func TestRequestQuitUnsubscribesBeforeNativeQuit(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+
+	// Record the ordering F5 mandates: unsubscribe, then native quit. The
+	// unsubscribe wrap is guarded by the controller mutex; the quit hook by
+	// the view's own mutex (the view reference itself is immutable).
+	var mu sync.Mutex
+	var order []string
+	h.ctl.mu.Lock()
+	origUnsub := h.ctl.stopSub
+	h.ctl.stopSub = func() {
+		mu.Lock()
+		order = append(order, "unsubscribe")
+		mu.Unlock()
+		origUnsub()
+	}
+	h.ctl.mu.Unlock()
+	h.view.setOnQuit(func() {
+		mu.Lock()
+		order = append(order, "quit")
+		mu.Unlock()
+	})
+
+	h.ctl.doAction(ActionQuit)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 2 || order[0] != "unsubscribe" || order[1] != "quit" {
+		t.Fatalf("quit order = %v, want [unsubscribe quit]", order)
 	}
 }
