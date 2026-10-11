@@ -6,6 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rcast is a lightweight DLNA/UPnP AV MediaRenderer (DMR) written in Go for macOS. It announces itself on the LAN, accepts external cast/control requests from DLNA control points, and plays media via IINA. The default command is headless; `rcast gui` adds an optional native menu bar front end over the same runtime and player state.
 
+## Component Knowledge Base
+
+`knowledge/` at the repository root holds the five-part knowledge base
+(FLOW / DECISIONS / HISTORY / TODO / SCENARIOS) for the whole DMR pipeline —
+discovery, session ownership, playback control, shutdown, and the GUI front
+end. Read FLOW (stage-by-stage main and exception paths, including IP-change
+rebinding and the reliable-stop escalation chain) and DECISIONS (mpv IPC
+control channel, single-session + vendor code 800, busy-vs-dead player
+classification, GENA 501 deferral, keep-open + end-file position pinning)
+before changing lifecycle or protocol behavior; verify changes against
+SCENARIOS and update only the affected parts. TODO entries are background,
+not an authorization list.
+
 ## Development Commands
 
 ### Building
