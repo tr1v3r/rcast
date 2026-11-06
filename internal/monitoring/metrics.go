@@ -51,6 +51,13 @@ func (m *Metrics) RecordHTTPRequest(method string, duration time.Duration) {
 	defer m.mu.Unlock()
 
 	m.HTTPRequestsTotal++
+	// Unknown HTTP method tokens are caller-controlled; aggregate them to
+	// keep both the map and the exported time series bounded.
+	switch method {
+	case "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE", "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY":
+	default:
+		method = "OTHER"
+	}
 	m.HTTPRequestsByMethod[method]++
 	m.HTTPRequestDuration += duration
 }
