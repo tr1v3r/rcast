@@ -46,6 +46,26 @@ func TestSetAVTransportURI_EmptyURI(t *testing.T) {
 	assertUPnPError(t, rec, 402)
 }
 
+func TestSetAVTransportURI_RejectsUnsupportedURIBeforePreempting(t *testing.T) {
+	fake := newFakePlayer()
+	st, cleanup := newAVTState(t, func() player.Player { return fake })
+	defer cleanup()
+	handler := AVTransportHandler(st, config.Config{AllowSessionPreempt: true})
+	const current = "http://[::1]:8080/a%20b.mp4"
+	setupAVT(t, st, handler, "10.0.0.1:1", current)
+
+	for _, uri := range []string{"--help", "--mpv-input-ipc-server=/tmp/test", "/tmp/video", "file:///tmp/video", "https:video", "http://:8200/path", "https://[::1"} {
+		t.Run(uri, func(t *testing.T) {
+			resp := serveAction(handler, "SetAVTransportURI", soapBody("<CurrentURI>"+uri+"</CurrentURI>"), "10.0.0.2:1")
+			assertUPnPError(t, resp, 402)
+			snap := st.Snapshot()
+			if snap.SessionOwner != "10.0.0.1" || snap.TransportURI != current || snap.TransportState != "PLAYING" || fake.stops != 0 || fake.playbackStops != 0 {
+				t.Fatalf("invalid URI affected active playback: %+v, Stop=%d StopPlayback=%d", snap, fake.stops, fake.playbackStops)
+			}
+		})
+	}
+}
+
 func TestSetAVTransportURI_FirstSetOK(t *testing.T) {
 	st, cleanup := newAVTState(t, nil)
 	defer cleanup()

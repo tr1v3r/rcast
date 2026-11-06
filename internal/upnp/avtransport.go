@@ -5,6 +5,7 @@ import (
 	"html"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -114,7 +115,8 @@ func AVTransportHandler(st *state.PlayerState, cfg config.Config) http.HandlerFu
 		switch sa {
 		case "SetAVTransportURI":
 			uri := XMLText(body, "CurrentURI")
-			if uri == "" {
+			parsed, err := url.Parse(uri)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 				monitoring.GetMetrics().RecordUPnPError()
 				WriteSOAPError(w, 402, "Invalid Args")
 				return
