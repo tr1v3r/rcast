@@ -210,7 +210,7 @@ func joinGroupOnInterface(uc *net.UDPConn, group net.IP, addrs []net.Addr) error
 	}
 	var sockErr error
 	ctrlErr := raw.Control(func(fd uintptr) {
-		sockErr = syscall.SetsockoptIPMreq(int(fd), syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, &mreq)
+		sockErr = syscall.SetsockoptIPMreq(socketFD(fd), syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, &mreq)
 	})
 	if ctrlErr != nil {
 		return ctrlErr
