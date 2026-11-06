@@ -1,6 +1,7 @@
 package monitoring
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +60,17 @@ func TestRecordHTTPRequestIncrementsCounters(t *testing.T) {
 	}
 	if m.HTTPRequestDuration != 35*time.Millisecond {
 		t.Errorf("HTTPRequestDuration = %v, want 35ms", m.HTTPRequestDuration)
+	}
+}
+
+func TestRecordHTTPRequestBoundsMethodLabels(t *testing.T) {
+	m := newTestMetrics()
+	m.RecordHTTPRequest("SUBSCRIBE", time.Millisecond)
+	for i := range 1000 {
+		m.RecordHTTPRequest("CUSTOM"+strconv.Itoa(i), time.Millisecond)
+	}
+	if len(m.HTTPRequestsByMethod) != 2 || m.HTTPRequestsByMethod["OTHER"] != 1000 || m.HTTPRequestsByMethod["SUBSCRIBE"] != 1 {
+		t.Fatalf("unexpected method counts: %v", m.HTTPRequestsByMethod)
 	}
 }
 
