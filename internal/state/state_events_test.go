@@ -85,3 +85,44 @@ func TestLateEndFileFromDetachedPlayerIsIgnored(t *testing.T) {
 		t.Fatalf("late old-player event changed state to %q", got)
 	}
 }
+
+type heldFramePlayer struct {
+	eventPlayer
+	atEOF  bool
+	closed bool
+}
+
+func (p *heldFramePlayer) PlaybackEnded(_ context.Context, natural bool) (bool, error) {
+	return natural && p.atEOF, nil
+}
+
+func (p *heldFramePlayer) Close(context.Context) error {
+	p.closed = true
+	return nil
+}
+
+func TestKeepOpenEOFAndStaleMediaEvents(t *testing.T) {
+	fake := &heldFramePlayer{eventPlayer: eventPlayer{duration: 95}}
+	st := newState(t, func() player.Player { return fake })
+	st.SetURI("https://example.test/first", "")
+	st.EnsurePlayer()
+	st.SetTransportState("PLAYING")
+	event := player.Event{Name: "property-change", Fields: map[string]any{"name": "eof-reached", "data": true}}
+	fake.atEOF = true
+	fake.emit(event)
+	if st.GetTransportState() != "STOPPED" {
+		t.Fatal("last frame held by keep-open did not stop transport")
+	}
+	st.SetURI("https://example.test/next", "")
+	st.SetTransportState("PLAYING")
+	fake.atEOF = false
+	for _, stale := range []player.Event{event, {Name: "end-file", Reason: "stop"}, {Name: "end-file", Reason: "redirect"}} {
+		fake.emit(stale)
+		if st.GetTransportState() != "PLAYING" {
+			t.Fatalf("late event %v stopped the next media", stale)
+		}
+	}
+	if err := st.StopPlayer(); err != nil || !fake.closed {
+		t.Fatalf("detached player disposal: closed=%t err=%v", fake.closed, err)
+	}
+}

@@ -162,6 +162,17 @@ func (p *IINAPlayer) Play(ctx context.Context, uri string, volume int) error {
 					log.CtxWarn(ctx, "reuse IINA set volume failed: %v", err)
 					return fmt.Errorf("setting volume on reused IINA: %w", err)
 				}
+				// A keep-open player holds its final frame. Unpausing
+				// alone cannot replay the completed media.
+				atEOF, err := p.PlaybackEnded(ctx, true)
+				if err != nil && !errors.Is(err, errIPCApp) {
+					return err
+				}
+				if atEOF {
+					if err := p.Seek(ctx, 0); err != nil {
+						return err
+					}
+				}
 				if err := p.Resume(ctx); err != nil {
 					return err
 				}
@@ -358,9 +369,9 @@ func (p *IINAPlayer) waitForIPC(ctx context.Context, sockPath string) error {
 				_ = conn.Close()
 				return fmt.Errorf("IINA IPC endpoint changed while starting")
 			}
-			p.installConnLocked(conn)
+			err := p.installConnLocked(ctx, conn)
 			p.mu.Unlock()
-			return nil
+			return err
 		}
 		lastErr = err
 		if !time.Now().Before(deadline) {
@@ -444,6 +455,19 @@ func (p *IINAPlayer) SetSpeed(ctx context.Context, speed float64) error {
 
 func (p *IINAPlayer) Seek(ctx context.Context, seconds float64) error {
 	return p.sendOK(ctx, []any{"seek", seconds, "absolute"}, "seek")
+}
+
+// PlaybackEnded rechecks the live player after an asynchronous notification.
+// eof-reached identifies a held final frame; idle-active identifies unloaded
+// media. A queued event for a replaced file cannot stop its playing successor.
+func (p *IINAPlayer) PlaybackEnded(ctx context.Context, natural bool) (bool, error) {
+	property := "idle-active"
+	if natural {
+		property = "eof-reached"
+	}
+	value, err := p.getProperty(ctx, property)
+	ended, _ := value.(bool)
+	return ended, err
 }
 
 func (p *IINAPlayer) GetPosition(ctx context.Context) (float64, error) {

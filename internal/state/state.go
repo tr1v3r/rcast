@@ -117,26 +117,40 @@ func (s *PlayerState) EnsurePlayer() player.Player {
 }
 
 func (s *PlayerState) handlePlayerEvent(source player.Player, generation uint64, event player.Event) {
-	if event.Name != "end-file" {
+	natural := event.Name == "end-file" && event.Reason == "eof" ||
+		event.Name == "property-change" && event.Fields["name"] == "eof-reached" && event.Fields["data"] == true
+	// mpv emits idle after unloading a file without a successor. A stop or
+	// redirect end-file can also occur during replacement, before the new
+	// file starts, and is not by itself an idle notification.
+	if !natural && event.Name != "idle" {
 		return
 	}
 
-	// Query without s.mu held: event handlers are allowed to call back into the
-	// player, and an IPC round trip must never block state readers.
-	duration, err := source.GetDuration(s.ctx)
-	if err != nil {
-		log.CtxWarn(s.ctx, "get duration after playback end: %v", err)
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	s.mu.RLock()
+	active := s.player != nil && s.playerGeneration == generation && s.transportState != "STOPPED"
+	s.mu.RUnlock()
+	if !active {
+		return
+	}
+	if checker, ok := source.(interface {
+		PlaybackEnded(context.Context, bool) (bool, error)
+	}); ok {
+		ended, err := checker.PlaybackEnded(s.ctx, natural)
+		if err != nil || !ended {
+			return
+		}
 	}
 
+	var duration float64
+	var err error
+	if natural {
+		duration, err = source.GetDuration(s.ctx)
+	}
 	s.mu.Lock()
-	// A late event from a preempted/stopped player must not overwrite the new
-	// player's state.
-	if s.player == nil || s.playerGeneration != generation {
-		s.mu.Unlock()
-		return
-	}
 	s.transportState = "STOPPED"
-	if err == nil && duration >= 0 {
+	if natural && err == nil && duration >= 0 {
 		s.finalPosition = duration
 		s.finalDuration = duration
 		s.finalPositionValid = true
@@ -201,6 +215,13 @@ func (s *PlayerState) stopPlayer(ctx context.Context) error {
 	}
 	if err := p.Stop(ctx); err != nil {
 		return err
+	}
+	// Stop permits relaunch on the same object. Once state detaches the
+	// player, dispose of its dispatcher and callback as well.
+	if closer, ok := p.(interface{ Close(context.Context) error }); ok {
+		if err := closer.Close(ctx); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
 	if s.player != nil && s.playerGeneration == generation {

@@ -138,7 +138,9 @@ func (p *IINAPlayer) beginSend(ctx context.Context, command []any) (<-chan ipcRe
 		if err != nil {
 			return nil, 0, fmt.Errorf("%w: %v", errIPCTransport, err), false
 		}
-		p.installConnLocked(conn)
+		if err := p.installConnLocked(ctx, conn); err != nil {
+			return nil, 0, err, false
+		}
 	}
 
 	ch := make(chan ipcResult, 1)
@@ -160,12 +162,26 @@ func (p *IINAPlayer) beginSend(ctx context.Context, command []any) (<-chan ipcRe
 
 // installConnLocked makes conn the current IPC connection and starts its
 // background reader. Caller must hold p.mu.
-func (p *IINAPlayer) installConnLocked(conn net.Conn) {
+func (p *IINAPlayer) installConnLocked(ctx context.Context, conn net.Conn) error {
 	p.resetConnLocked()
+	// With keep-open enabled, mpv holds the last frame at EOF. Subscribe
+	// on each new connection, including reconnects, so even an EOF reached
+	// while disconnected is delivered as the initial property value.
+	if p.eventFn != nil {
+		if err := conn.SetWriteDeadline(ipcDeadline(ctx)); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("%w: observe eof-reached: %v", errIPCTransport, err)
+		}
+		if _, err := conn.Write([]byte(`{"command":["observe_property",1,"eof-reached"]}` + "\n")); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("%w: observe eof-reached: %v", errIPCTransport, err)
+		}
+	}
 	p.conn = conn
 	p.connDead = false
 	p.connGen++
 	go p.readLoop(conn, bufio.NewReader(conn), p.connGen)
+	return nil
 }
 
 // resetConnLocked drops the current connection (if any) without touching the

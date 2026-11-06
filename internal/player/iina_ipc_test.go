@@ -112,6 +112,8 @@ func (s *fakeMPVServer) handle(conn *net.UnixConn) {
 						s.mu.Unlock()
 					}
 				}
+			case "seek":
+				s.setProp("time-pos", req.Command[1])
 			case "stop":
 				s.mu.Lock()
 				delete(s.props, "path")
@@ -226,6 +228,25 @@ func TestIINAPlayer_PlayLoadsNewURIAfterStopPlayback(t *testing.T) {
 	s.mu.Unlock()
 	if got != nextURI {
 		t.Fatalf("loaded path=%v, want %s", got, nextURI)
+	}
+}
+
+func TestPlayRestartsHeldFinalFrame(t *testing.T) {
+	s := newFakeMPVServer(t)
+	defer s.close()
+	const uri = "https://example.test/ended"
+	s.setProp("path", uri)
+	s.setProp("eof-reached", true)
+	p := playerOnSocket(t, s)
+	p.activate = nil
+	defer func() { _ = p.Close(context.Background()) }()
+	if err := p.Play(context.Background(), uri, 50); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.props["time-pos"] != float64(0) || s.props["pause"] != false {
+		t.Fatalf("replay properties = %v, want seek to zero and unpause", s.props)
 	}
 }
 
