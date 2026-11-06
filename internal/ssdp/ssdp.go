@@ -461,7 +461,18 @@ func respondLoop(ctx context.Context, loc *BaseURLSource, deviceUUID, serverName
 	if !ok {
 		return
 	}
-	defer func() { _ = conn.Close() }()
+	// Close the socket on cancellation to release blocked reads and writes.
+	// A terminal read error also cancels pending delayed responses.
+	ctx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	})
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
 	if err := conn.SetReadBuffer(65536); err != nil {
 		log.CtxWarn(ctx, "set SSDP read buffer: %v", err)
 	}
@@ -469,21 +480,18 @@ func respondLoop(ctx context.Context, loc *BaseURLSource, deviceUUID, serverName
 	responders := make(chan struct{}, responderCap)
 
 	backoff := time.Duration(0)
-	for {
+	for ctx.Err() == nil {
 		if err := conn.SetDeadline(time.Now().Add(searchReadDeadline)); err != nil {
 			log.CtxError(ctx, "set SSDP read deadline: %v", err)
 			return
 		}
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				// Socket closed underneath us; nothing more to read.
 				return
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if ctx.Err() != nil {
-					return
-				}
 				continue
 			}
 			// Persistent non-timeout read error (interface removed, network
@@ -513,7 +521,7 @@ func respondLoop(ctx context.Context, loc *BaseURLSource, deviceUUID, serverName
 			srcCopy := *src
 			// Read per packet so LOCATION follows base URL changes.
 			base := loc.Get()
-			go func() {
+			workers.Go(func() {
 				defer func() { <-responders }()
 				timer := time.NewTimer(randomDelay(mx))
 				defer timer.Stop()
@@ -528,7 +536,7 @@ func respondLoop(ctx context.Context, loc *BaseURLSource, deviceUUID, serverName
 						log.CtxWarn(ctx, "write SSDP response: %v", err)
 					}
 				}
-			}()
+			})
 		default:
 			onDroppedSearch()
 			log.CtxWarn(ctx, "dropping SSDP search response: responder limit reached")

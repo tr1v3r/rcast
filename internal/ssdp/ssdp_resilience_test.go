@@ -103,6 +103,33 @@ func TestSearchResponderPersistentReadErrorBacksOffAndCancels(t *testing.T) {
 	}
 }
 
+// A busy LAN can deliver datagrams continuously, without a read timeout.
+type cancelOnPacketConn struct {
+	*fakeUDPConn
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (c *cancelOnPacketConn) ReadFromUDP(buf []byte) (int, *net.UDPAddr, error) {
+	c.reads++
+	if c.reads > 1 {
+		return 0, nil, net.ErrClosed
+	}
+	c.cancel()
+	return copy(buf, "NOTIFY * HTTP/1.1"), &net.UDPAddr{}, nil
+}
+
+func TestSearchResponderCancelsWithContinuousTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := &cancelOnPacketConn{fakeUDPConn: newFakeUDPConn(), cancel: cancel}
+	withListenConn(t, conn)
+	SearchResponder(ctx, "http://192.0.2.1:8200", "uuid:test", "rcast/1.0")
+	if conn.reads != 1 {
+		t.Fatalf("reads after cancellation = %d", conn.reads-1)
+	}
+}
+
 func TestSearchResponderReturnsOnClosedConn(t *testing.T) {
 	withListenConn(t, &closedReadConn{fakeUDPConn: newFakeUDPConn()})
 
