@@ -122,6 +122,15 @@ func TestOnEvent_SurvivesReconnect(t *testing.T) {
 		t.Fatalf("SetVolume #2 after reconnect: %v", err)
 	}
 
+	observed := 0
+	for _, command := range s.recordedCommands() {
+		if len(command) == 3 && command[0] == "observe_property" && command[2] == "eof-reached" {
+			observed++
+		}
+	}
+	if observed != 2 {
+		t.Fatalf("EOF observations = %d, want one per connection", observed)
+	}
 	s.pushLine(`{"event":"end-file","reason":"stop"}`)
 	select {
 	case ev := <-got:
