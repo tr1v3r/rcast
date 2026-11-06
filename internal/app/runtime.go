@@ -220,11 +220,11 @@ func (r *Runtime) manage(
 	waitBounded(ssdpWG, ssdpGrace, "SSDP shutdown")
 	r.state.Stop()
 
+	log.Info("bye")
 	r.mu.Lock()
 	r.err = runErr
 	close(r.done)
 	r.mu.Unlock()
-	log.Info("bye")
 }
 
 func defaultDependencies() Dependencies {
