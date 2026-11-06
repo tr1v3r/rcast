@@ -1,6 +1,7 @@
 package upnp
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/tr1v3r/rcast/internal/config"
 	"github.com/tr1v3r/rcast/internal/player"
+	"github.com/tr1v3r/rcast/internal/state"
 )
 
 type blockingResponseWriter struct {
@@ -81,5 +83,16 @@ func TestSlowSOAPWriterDoesNotBlockStopCommand(t *testing.T) {
 	case <-volumeDone:
 	case <-time.After(time.Second):
 		t.Fatal("slow response did not finish after release")
+	}
+}
+
+func TestRetiredRuntimeRejectsMutatingSOAP(t *testing.T) {
+	ctx, retire := context.WithCancel(context.Background())
+	st := state.New(ctx, config.Config{})
+	retire()
+	rec := serveAction(RenderingControlHandler(st, config.Config{}), "SetVolume",
+		soapBody("<DesiredVolume>99</DesiredVolume>"), "10.0.0.1:1")
+	if rec.Code != http.StatusInternalServerError || st.GetVolume() == 99 {
+		t.Fatalf("retired runtime processed command: HTTP %d volume %d", rec.Code, st.GetVolume())
 	}
 }

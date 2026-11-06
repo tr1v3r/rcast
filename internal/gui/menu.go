@@ -57,14 +57,13 @@ type Settings struct {
 }
 
 // settingsFromConfig derives the initial toggle state from the loaded config
-// (settings.json merged over env, see internal/config) and the CLI debug
-// flag.
-func settingsFromConfig(cfg config.Config, debug bool) Settings {
+// after CLI overrides have been applied.
+func settingsFromConfig(cfg config.Config) Settings {
 	return Settings{
 		IINAFullscreen:   cfg.IINAFullscreen,
 		LinkSystemVolume: cfg.LinkSystemOutputVolume,
 		AllowPreempt:     cfg.AllowSessionPreempt,
-		Debug:            cfg.DebugLog || debug,
+		Debug:            cfg.DebugLog,
 	}
 }
 

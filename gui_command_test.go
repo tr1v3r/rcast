@@ -94,8 +94,8 @@ func TestGUICommandFlagPassthrough(t *testing.T) {
 	if !rec.called {
 		t.Fatal("gui action did not reach the guiRun seam")
 	}
-	if !rec.deps.InitialDebug {
-		t.Error("InitialDebug = false, want true from --debug")
+	if !rec.cfg.DebugLog {
+		t.Error("DebugLog = false, want true from --debug")
 	}
 	if !rec.cfg.IINAFullscreen {
 		t.Error("cfg.IINAFullscreen = false, want true from --fs")
@@ -112,8 +112,8 @@ func TestGUICommandDefaultsFromConfig(t *testing.T) {
 	if err := root.Run(context.Background(), []string{"rcast", "gui"}); err != nil {
 		t.Fatalf("run gui subcommand: %v", err)
 	}
-	if rec.deps.InitialDebug {
-		t.Error("InitialDebug = true, want false without flags")
+	if rec.cfg.DebugLog {
+		t.Error("DebugLog = true, want false without flags")
 	}
 	if !rec.cfg.IINAFullscreen {
 		t.Error("cfg.IINAFullscreen = false, want config default true")
@@ -127,8 +127,8 @@ func TestGUICommandRootFlagsHonored(t *testing.T) {
 	if err := root.Run(context.Background(), []string{"rcast", "--debug", "--fullscreen", "gui"}); err != nil {
 		t.Fatalf("run gui subcommand: %v", err)
 	}
-	if !rec.deps.InitialDebug {
-		t.Error("InitialDebug = false, want true from root --debug")
+	if !rec.cfg.DebugLog {
+		t.Error("DebugLog = false, want true from root --debug")
 	}
 	if !rec.cfg.IINAFullscreen {
 		t.Error("cfg.IINAFullscreen = false, want true from root --fullscreen")
@@ -237,4 +237,21 @@ func TestWatchGUIForceExitArmsAfterFirstSignal(t *testing.T) {
 		t.Fatal("not disarmed after the GUI returned")
 	}
 	<-done
+}
+
+func TestGUIExplicitFalseOverridesConfiguredAndRootFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"rcast", "gui", "--debug=false", "--fs=false"},
+		{"rcast", "--debug=false", "--fs=false", "gui"},
+		{"rcast", "--debug", "--fs", "gui", "--debug=false", "--fullscreen=false"},
+	} {
+		rec := withRecordedGUI(t)
+		cmd := newRootCommand(config.Config{DebugLog: true, IINAFullscreen: true})
+		if err := cmd.Run(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+		if rec.cfg.DebugLog || rec.cfg.IINAFullscreen {
+			t.Fatalf("%v: debug=%t fullscreen=%t", args, rec.cfg.DebugLog, rec.cfg.IINAFullscreen)
+		}
+	}
 }

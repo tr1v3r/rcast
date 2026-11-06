@@ -152,7 +152,8 @@ func TestSettingsFromConfigAndApplyTo(t *testing.T) {
 		LinkSystemOutputVolume: true,
 		AllowSessionPreempt:    false,
 	}
-	s := settingsFromConfig(cfg, true)
+	cfg.DebugLog = true
+	s := settingsFromConfig(cfg)
 	if !s.IINAFullscreen || !s.LinkSystemVolume || s.AllowPreempt || !s.Debug {
 		t.Fatalf("settingsFromConfig = %+v", s)
 	}

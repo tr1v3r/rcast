@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -193,8 +194,7 @@ func newGUIHarness(t *testing.T) *guiHarness {
 			h.systemMux.Unlock()
 			return nil
 		},
-		// Recorded instead of applied: the real log.SetLevel races
-		// concurrent server logging inside the upstream handler.
+		// Capture the levels applied by the controller.
 		SetLogLevel: func(level log.Level) {
 			h.logMu.Lock()
 			h.logLevels = append(h.logLevels, level)
@@ -551,7 +551,7 @@ func TestConcurrentRestartTriggersNoDoubleOrMissed(t *testing.T) {
 	drainDeadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(drainDeadline) {
 		h.ctl.mu.Lock()
-		drained := !h.ctl.pendingRestart && !h.ctl.restarting
+		drained := !h.ctl.pendingRestart
 		h.ctl.mu.Unlock()
 		if drained {
 			break
@@ -559,10 +559,10 @@ func TestConcurrentRestartTriggersNoDoubleOrMissed(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	h.ctl.mu.Lock()
-	pending, restarting := h.ctl.pendingRestart, h.ctl.restarting
+	pending := h.ctl.pendingRestart
 	h.ctl.mu.Unlock()
-	if pending || restarting {
-		t.Fatalf("restart state not drained after 15s: pending=%v restarting=%v starts=%d", pending, restarting, h.starts.Load())
+	if pending {
+		t.Fatalf("restart state not drained after 15s: pending=%v starts=%d", pending, h.starts.Load())
 	}
 	stableSince := time.Now()
 	last := h.starts.Load()
@@ -623,4 +623,93 @@ func TestRequestQuitUnsubscribesBeforeNativeQuit(t *testing.T) {
 	if len(order) < 2 || order[0] != "unsubscribe" || order[1] != "quit" {
 		t.Fatalf("quit order = %v, want [unsubscribe quit]", order)
 	}
+}
+
+func TestRestartWaitsForAdmittedPlay(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+	st := h.state()
+	done := make(chan struct{})
+	st.Serialize(func() {
+		// A remote Play has the command lock but hasn't published PLAYING yet.
+		go func() {
+			h.ctl.scheduleRestart()
+			close(done)
+		}()
+		eventually(t, "pending settings", func() bool {
+			h.ctl.mu.Lock()
+			defer h.ctl.mu.Unlock()
+			return h.ctl.pendingRestart
+		})
+		st.SetTransportState("PLAYING")
+	})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("restart spun while playback was active")
+	}
+	if st.Context().Err() != nil || h.starts.Load() != 1 {
+		t.Fatal("restart interrupted the admitted Play")
+	}
+
+	st.SetTransportState("STOPPED")
+	eventually(t, "restart after playback", func() bool { return h.starts.Load() == 2 })
+}
+
+func TestMuteUsesRunningLinkSettingWhileRestartPending(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+	h.state().SetTransportState("PLAYING")
+	h.ctl.doToggle(ToggleLinkVolume)
+	h.ctl.doAction(ActionMute)
+	h.systemMux.Lock()
+	defer h.systemMux.Unlock()
+	if len(h.systemMutes) != 0 {
+		t.Fatalf("macOS mute changed before the restart: %v", h.systemMutes)
+	}
+}
+
+func TestQuitDuringRestartCancelsRetry(t *testing.T) {
+	h := newGUIHarness(t)
+	defer h.close()
+	starting := make(chan struct{})
+	h.ctl.mu.Lock() // the initial snapshot may still be reading controller deps
+	h.ctl.deps.StartServer = func(ctx context.Context, _ config.Config) (*app.Runtime, error) {
+		close(starting) // a second start after Quit would panic
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	h.ctl.mu.Unlock()
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		h.ctl.scheduleRestart()
+	}()
+	select {
+	case <-starting:
+	case <-time.After(time.Second):
+		t.Fatal("restart did not begin")
+	}
+	h.ctl.doAction(ActionQuit)
+	<-restarted
+	if got := h.view.quitCount(); got != 1 {
+		t.Fatalf("quit calls = %d", got)
+	}
+}
+
+func TestGUILogLevelConcurrentWithOutput(t *testing.T) {
+	h := &guiLogHandler{StreamHandler: log.NewStreamHandler(log.TraceLevel)}
+	h.SetOutput(io.Discard)
+	defer h.Close()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			h.SetLevel(log.InfoLevel)
+			h.SetLevel(log.DebugLevel)
+		}
+	})
+	for range 1000 {
+		h.Output(log.DebugLevel, context.Background(), "request")
+	}
+	wg.Wait()
 }

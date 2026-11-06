@@ -37,17 +37,12 @@ type Deps struct {
 	// defaults to the internal/player implementation on darwin.
 	SetSystemMute func(m bool) error
 
-	// SetLogLevel applies the Debug Logging toggle. It defaults to
-	// log.SetLevel; injectable because the upstream handler reads the level
-	// without synchronization while servers log concurrently (benign torn
-	// read of a word-sized value, but the race detector flags it).
+	// SetLogLevel applies the Debug Logging toggle. The native view installs
+	// a level-filtering handler before starting any server goroutines.
 	SetLogLevel func(level log.Level)
 
 	// Version is shown in the About row; "dev" when empty.
 	Version string
-
-	// InitialDebug seeds the Debug Logging toggle from the CLI flag.
-	InitialDebug bool
 }
 
 func (d Deps) version() string {
@@ -55,14 +50,6 @@ func (d Deps) version() string {
 		return "dev"
 	}
 	return d.Version
-}
-
-func (d Deps) setLogLevel(level log.Level) {
-	if d.SetLogLevel != nil {
-		d.SetLogLevel(level)
-		return
-	}
-	log.SetLevel(level)
 }
 
 // menuView is the platform rendering surface driven by the controller.
@@ -96,18 +83,20 @@ func (s *settings) update(fn func(*Settings)) Settings {
 // menu interactions into the same semantics the UPnP handlers implement.
 type controller struct {
 	ctx    context.Context
+	cancel context.CancelFunc
 	deps   Deps
 	set    *settings
 	view   menuView
 	baseCf config.Config
 
-	mu             sync.Mutex
-	rt             *app.Runtime
-	stopSub        func()
-	lastSnap       state.Snapshot
-	pendingRestart bool
-	restarting     bool
-	fatal          error
+	lifecycleMu      sync.Mutex // serializes runtime replacement and final shutdown
+	mu               sync.Mutex
+	rt               *app.Runtime
+	stopSub          func()
+	lastSnap         state.Snapshot
+	pendingRestart   bool
+	linkSystemVolume bool // setting captured by the current runtime
+	fatal            error
 
 	quitOnce  sync.Once
 	viewReady chan struct{}
@@ -119,13 +108,18 @@ type controller struct {
 // delivers an initial one immediately) are not lost. A nil Deps.StartServer
 // selects the platform default production wiring.
 func newController(ctx context.Context, cfg config.Config, deps Deps, view menuView) (*controller, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	c := &controller{
+		cancel:    cancel,
 		ctx:       ctx,
 		deps:      deps,
-		set:       &settings{val: settingsFromConfig(cfg, deps.InitialDebug)},
+		set:       &settings{val: settingsFromConfig(cfg)},
 		view:      view,
 		baseCf:    cfg,
 		viewReady: make(chan struct{}),
+	}
+	if c.deps.SetLogLevel == nil {
+		c.deps.SetLogLevel = installGUILogHandler()
 	}
 	if c.deps.StartServer == nil {
 		c.deps.StartServer = defaultStartServer(c.set)
@@ -136,9 +130,10 @@ func newController(ctx context.Context, cfg config.Config, deps Deps, view menuV
 	// Keep the actual log level consistent with the seeded toggle state
 	// (settings.json may enable debug without a CLI flag).
 	if c.set.snapshot().Debug {
-		c.deps.setLogLevel(log.DebugLevel)
+		c.deps.SetLogLevel(log.DebugLevel)
 	}
 	if err := c.startServer(); err != nil {
+		cancel()
 		return nil, err
 	}
 	go func() {
@@ -154,15 +149,20 @@ func (c *controller) markViewReady() {
 }
 
 // startServer launches the runtime with the current settings and subscribes
-// menu refreshes to state changes. Callers must hold no controller locks.
+// menu refreshes to state changes. Replacements hold lifecycleMu.
 func (c *controller) startServer() error {
-	rt, err := c.deps.StartServer(c.ctx, c.set.snapshot().applyTo(c.baseCf))
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
+	cfg := c.set.snapshot().applyTo(c.baseCf)
+	rt, err := c.deps.StartServer(c.ctx, cfg)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.rt = rt
-	c.stopSub = rt.State().Subscribe(c.onSnapshot)
+	c.linkSystemVolume = cfg.LinkSystemOutputVolume
+	c.stopSub = rt.State().Subscribe(func(snap state.Snapshot) { c.onSnapshot(rt, snap) })
 	c.mu.Unlock()
 	go c.watchRuntime(rt)
 	return nil
@@ -186,42 +186,28 @@ func (c *controller) watchRuntime(rt *app.Runtime) {
 
 // onSnapshot renders the menu for each state change. It runs on the
 // subscription worker, so renders are serialized per subscriber (t3).
-func (c *controller) onSnapshot(snap state.Snapshot) {
-	model := BuildModel(snap, c.set.snapshot(), c.deps.version())
-
+func (c *controller) onSnapshot(rt *app.Runtime, snap state.Snapshot) {
 	c.mu.Lock()
+	if c.rt != rt || c.ctx.Err() != nil {
+		c.mu.Unlock()
+		return
+	}
 	c.lastSnap = snap
+	c.view.render(BuildModel(snap, c.set.snapshot(), c.deps.version()))
 	pending := c.pendingRestart
 	c.mu.Unlock()
 
-	c.view.render(model)
-	if pending && c.liveIdle() {
-		c.restartServer()
+	if pending && snap.TransportState == "STOPPED" {
+		c.restartWhenIdle()
 	}
 }
 
-// liveIdle reports whether the authoritative player state is idle. Deferred
-// restarts consult it because the subscription queue may still hold stale
-// STOPPED snapshots that were delivered while playback had already moved on.
-func (c *controller) liveIdle() bool {
-	c.mu.Lock()
-	rt := c.rt
-	c.mu.Unlock()
-	if rt == nil {
-		return true
-	}
-	ts := rt.State().GetTransportState()
-	return ts == "STOPPED" || ts == ""
-}
-
-// refresh re-renders the menu from the latest known state and the current
-// settings. Used after settings toggles, which do not always produce a state
-// notification.
 func (c *controller) refresh() {
 	c.mu.Lock()
-	snap := c.lastSnap
-	c.mu.Unlock()
-	c.view.render(BuildModel(snap, c.set.snapshot(), c.deps.version()))
+	defer c.mu.Unlock()
+	if c.ctx.Err() == nil {
+		c.view.render(BuildModel(c.lastSnap, c.set.snapshot(), c.deps.version()))
+	}
 }
 
 // doAction executes a menu command with the same semantics as the UPnP
@@ -230,7 +216,12 @@ func (c *controller) refresh() {
 func (c *controller) doAction(a Action) {
 	c.mu.Lock()
 	rt := c.rt
+	linkSystemVolume := c.linkSystemVolume
 	c.mu.Unlock()
+	if a == ActionQuit {
+		c.requestQuit()
+		return
+	}
 	if rt == nil {
 		return
 	}
@@ -240,6 +231,9 @@ func (c *controller) doAction(a Action) {
 	switch a {
 	case ActionPlayPause:
 		st.Serialize(func() {
+			if ctx.Err() != nil {
+				return
+			}
 			snap := st.Snapshot()
 			switch snap.TransportState {
 			case "PLAYING":
@@ -285,6 +279,9 @@ func (c *controller) doAction(a Action) {
 
 	case ActionStop:
 		st.Serialize(func() {
+			if ctx.Err() != nil {
+				return
+			}
 			if err := st.StopPlayer(); err != nil {
 				c.playerError("stop", err)
 				return
@@ -297,6 +294,9 @@ func (c *controller) doAction(a Action) {
 
 	case ActionMute:
 		st.Serialize(func() {
+			if ctx.Err() != nil {
+				return
+			}
 			m := !st.GetMute()
 			if p := st.GetActivePlayer(); p != nil {
 				if err := p.SetMute(ctx, m); err != nil {
@@ -304,7 +304,7 @@ func (c *controller) doAction(a Action) {
 					return
 				}
 			}
-			if c.set.snapshot().LinkSystemVolume && c.deps.SetSystemMute != nil {
+			if linkSystemVolume && c.deps.SetSystemMute != nil {
 				if err := c.deps.SetSystemMute(m); err != nil {
 					log.CtxWarn(ctx, "gui: set system mute: %v", err)
 				}
@@ -312,8 +312,6 @@ func (c *controller) doAction(a Action) {
 			st.SetMute(m)
 		})
 
-	case ActionQuit:
-		c.requestQuit()
 	}
 }
 
@@ -339,7 +337,7 @@ func (c *controller) doToggle(t Toggle) {
 			if s.Debug {
 				level = log.DebugLevel
 			}
-			c.deps.setLogLevel(level)
+			c.deps.SetLogLevel(level)
 		}
 	})
 
@@ -377,84 +375,64 @@ func (c *controller) scheduleRestart() {
 	c.mu.Lock()
 	c.pendingRestart = true
 	c.mu.Unlock()
-	if c.liveIdle() {
-		c.restartServer()
+	c.restartWhenIdle()
+}
+
+// Commands and restart admission share the state command lock. An admitted
+// command finishes before the idle check. Later commands see the cancelled
+// runtime context. Wait must run outside that lock so state.Stop can drain.
+func (c *controller) restartWhenIdle() {
+	c.lifecycleMu.Lock()
+	err := c.replaceIdleRuntime()
+	c.lifecycleMu.Unlock()
+	if err != nil && c.ctx.Err() == nil {
+		c.setFatal(fmt.Errorf("restart server: %w", err))
+		c.requestQuit()
 	}
 }
 
-// restartServer replaces the runtime so handler-captured settings refresh.
-// The claim (pendingRestart -> restarting) is one atomic mutex section, so
-// concurrent triggers cannot interleave teardown and start. After each
-// restart it re-checks pendingRestart: a toggle that armed while the
-// restart was in flight no longer has a fresh initial snapshot to ride, so
-// this loop is what guarantees it is not missed. It refuses to run
-// mid-playback; the pending restart then retries when the next STOPPED
-// snapshot arrives.
-func (c *controller) restartServer() {
-	for {
-		c.mu.Lock()
-		if c.restarting || !c.pendingRestart {
-			c.mu.Unlock()
+func (c *controller) replaceIdleRuntime() error {
+	c.mu.Lock()
+	rt := c.rt
+	pending := c.pendingRestart
+	c.mu.Unlock()
+	if !pending || rt == nil || c.ctx.Err() != nil || rt.State().GetTransportState() != "STOPPED" {
+		return nil
+	}
+
+	restart := false
+	rt.State().Serialize(func() {
+		if rt.State().GetTransportState() != "STOPPED" || rt.State().Context().Err() != nil {
 			return
 		}
-		c.restarting = true
+		c.mu.Lock()
 		c.pendingRestart = false
-		rt := c.rt
-		stopSub := c.stopSub
+		c.stopSub()
+		c.stopSub = nil
+		c.rt = nil
 		c.mu.Unlock()
-
-		if !c.runOneRestart(rt, stopSub) {
-			c.mu.Lock()
-			c.restarting = false
-			c.mu.Unlock()
-			return // fatal path already requested quit
-		}
-
-		c.mu.Lock()
-		c.restarting = false
-		rearmed := c.pendingRestart
-		c.mu.Unlock()
-		if !rearmed {
-			log.CtxInfo(c.ctx, "gui: server restarted with updated settings")
-			return
-		}
-		// Re-armed while restarting: apply the newer settings immediately.
-	}
-}
-
-// runOneRestart performs one teardown/start cycle for an already-claimed
-// restart. It reports false when the restart failed fatally and the app is
-// quitting.
-func (c *controller) runOneRestart(rt *app.Runtime, stopSub func()) bool {
-	if !c.liveIdle() {
-		// Playback started between the caller's idle check and the claim;
-		// re-arm and wait for the transport to stop again.
-		c.mu.Lock()
-		c.pendingRestart = true
-		c.mu.Unlock()
-		return true
-	}
-
-	if stopSub != nil {
-		stopSub()
-	}
-	if rt != nil {
 		rt.Stop()
-		if err := rt.Wait(); err != nil {
-			log.CtxWarn(c.ctx, "gui: old server stopped with error: %v", err)
-		}
+		restart = true
+	})
+	if !restart {
+		return nil // keep pending; the next STOPPED notification will retry
 	}
-
-	if err := c.startServer(); err != nil {
-		// One retry: the listener may need a beat to release the port.
-		time.Sleep(500 * time.Millisecond)
-		if err := c.startServer(); err != nil {
-			c.setFatal(fmt.Errorf("restart server: %w", err))
-			c.requestQuit()
-			return false
-		}
+	if err := rt.Wait(); err != nil {
+		log.CtxWarn(c.ctx, "gui: old server stopped with error: %v", err)
 	}
-	return true
+	if c.ctx.Err() != nil {
+		return nil
+	}
+	if err := c.startServer(); err == nil {
+		return nil
+	}
+	// A listener may need a moment to release its port. Quit cancels the retry.
+	select {
+	case <-c.ctx.Done():
+		return nil
+	case <-time.After(500 * time.Millisecond):
+		return c.startServer()
+	}
 }
 
 func (c *controller) setFatal(err error) {
@@ -479,10 +457,13 @@ func (c *controller) playerError(what string, err error) {
 // native event loop has exited.
 func (c *controller) requestQuit() {
 	c.quitOnce.Do(func() {
+		c.cancel()
 		select {
 		case <-c.viewReady:
 		case <-time.After(10 * time.Second):
 		}
+		c.lifecycleMu.Lock()
+		defer c.lifecycleMu.Unlock()
 		c.mu.Lock()
 		stopSub := c.stopSub
 		c.stopSub = nil
@@ -499,6 +480,9 @@ func (c *controller) requestQuit() {
 // invoked on the Quit path (verified in the t1 spike), so all cleanup lives
 // here, after Run returns.
 func (c *controller) shutdown() error {
+	c.cancel()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
 	c.mu.Lock()
 	rt := c.rt
 	stopSub := c.stopSub

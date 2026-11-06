@@ -106,17 +106,22 @@ func newGUICommand(cfg config.Config) *cli.Command {
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			debug := cmd.Bool("debug") || cmd.Root().Bool("debug")
-			fullscreen := cmd.Bool("fullscreen") || cmd.Root().Bool("fullscreen")
-
-			if debug {
-				log.SetLevel(log.DebugLevel)
-			}
-			cfg.IINAFullscreen = fullscreen
-
-			return runGUI(ctx, cmd, cfg, debug)
+			cfg.DebugLog = guiBool(cmd, "debug", cfg.DebugLog)
+			cfg.IINAFullscreen = guiBool(cmd, "fullscreen", cfg.IINAFullscreen)
+			return runGUI(ctx, cfg)
 		},
 	}
+}
+
+// guiBool honors an explicit subcommand flag before the root flag and config.
+func guiBool(cmd *cli.Command, name string, fallback bool) bool {
+	if cmd.IsSet(name) {
+		return cmd.Bool(name)
+	}
+	if cmd.Root().IsSet(name) {
+		return cmd.Root().Bool(name)
+	}
+	return fallback
 }
 
 // runGUI drives the menu bar app. Signals cancel the context and the GUI
@@ -127,7 +132,7 @@ func newGUICommand(cfg config.Config) *cli.Command {
 // process, matching the headless semantics from #8. gui.Run stays on the
 // main goroutine (the systray event loop owns the main thread); the signal
 // watch runs beside it.
-func runGUI(ctx context.Context, cmd *cli.Command, cfg config.Config, debug bool) error {
+func runGUI(ctx context.Context, cfg config.Config) error {
 	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
@@ -135,8 +140,7 @@ func runGUI(ctx context.Context, cmd *cli.Command, cfg config.Config, debug bool
 	go watchGUIForceExit(ctx, guiDone, armForceExit)
 
 	err := guiRun(ctx, cfg, gui.Deps{
-		Version:      version,
-		InitialDebug: debug,
+		Version: version,
 	})
 	close(guiDone)
 	return err

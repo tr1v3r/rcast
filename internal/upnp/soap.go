@@ -94,6 +94,10 @@ func (r *bufferedSOAPResponse) flush(w http.ResponseWriter) {
 func serializeSOAP(st *state.PlayerState, w http.ResponseWriter, fn func(http.ResponseWriter)) {
 	response := state.SerializeResult(st, func() *bufferedSOAPResponse {
 		buffer := newBufferedSOAPResponse()
+		if st.Context().Err() != nil {
+			WriteSOAPError(buffer, 501, "Action Failed")
+			return buffer
+		}
 		fn(buffer)
 		return buffer
 	})

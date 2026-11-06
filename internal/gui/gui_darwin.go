@@ -158,17 +158,16 @@ func (v *systrayView) ready(c *controller) {
 	// Publish the complete menu, then swap out any model buffered while it
 	// was being built (the state subscription delivers its initial snapshot
 	// immediately).
-	c.markViewReady()
 	v.mu.Lock()
 	v.mStatus, v.mTitle, v.mVolume, v.mOwner = mStatus, mTitle, mVolume, mOwner
 	v.mPlayPause, v.mStop, v.mMute = mPlayPause, mStop, mMute
 	v.mToggles, v.mAbout, v.mQuit = toggles, mAbout, mQuit
-	pending := v.pending
-	v.pending = nil
-	v.mu.Unlock()
-	if pending != nil {
-		v.render(*pending)
+	if v.pending != nil {
+		v.renderLocked(*v.pending)
+		v.pending = nil
 	}
+	v.mu.Unlock()
+	c.markViewReady()
 	go v.pump()
 }
 
@@ -177,6 +176,8 @@ func (v *systrayView) pump() {
 	c := v.cntrl
 	for {
 		select {
+		case <-c.ctx.Done():
+			return
 		case <-v.mPlayPause.ClickedCh:
 			c.doAction(ActionPlayPause)
 		case <-v.mStop.ClickedCh:
@@ -204,6 +205,10 @@ func (v *systrayView) pump() {
 func (v *systrayView) render(m Model) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.renderLocked(m)
+}
+
+func (v *systrayView) renderLocked(m Model) {
 	if v.mStatus == nil {
 		model := m
 		v.pending = &model
